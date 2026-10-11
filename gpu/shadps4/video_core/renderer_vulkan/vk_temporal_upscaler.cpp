@@ -17,6 +17,7 @@
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "ffx_vk_portable.h"
+#include "bbport_metalfx.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
 #include "video_core/host_shaders/upscale_reactive_comp.h"
 #include "video_core/host_shaders/taa_comp.h"
@@ -163,7 +164,9 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
       runtime{runtime_}, camera_motion{camera_motion_}, scene_targets{scene_targets_} {
     // Reject unsupported shaders before allocating resources or recording a frame.
     BbSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(),
-                                         instance.IsFsr411Supported());
+                                         instance.IsFsr411Supported(),
+                                         instance.IsMetalObjectsSupported() &&
+                                             BbMetalFx::Supported());
     fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
     // Available unless BB_UPSCALER=none; on/off and the parameters are the menu's settings.
     const char* env = std::getenv("BB_UPSCALER");
@@ -224,14 +227,16 @@ bool TemporalUpscaler::Active() const {
     return enabled && !failed &&
            (BbSettings::Get().upscaler == BbSettings::UpscalerFsr3 ||
             BbSettings::IsFsr4(BbSettings::Get().upscaler) ||
-            BbSettings::Get().upscaler == BbSettings::UpscalerTaa) &&
+            BbSettings::Get().upscaler == BbSettings::UpscalerTaa ||
+            BbSettings::Get().upscaler == BbSettings::UpscalerMetalFx) &&
            !BbToggle::Disabled(1u << 24);
 }
 
 bool TemporalUpscaler::ReactiveOn() const {
     // FSR 4 takes no reactive mask: the opaque snapshot and the mask pass would be wasted.
     return BbSettings::Get().reactive && !BbToggle::Disabled(1u << 27) && !UseFsr4() &&
-           BbSettings::Get().upscaler != BbSettings::UpscalerTaa;
+           BbSettings::Get().upscaler != BbSettings::UpscalerTaa &&
+           BbSettings::Get().upscaler != BbSettings::UpscalerMetalFx; // MetalFX: no mask input
 }
 
 void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
@@ -364,12 +369,14 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
 bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     const bool use_fsr4 = UseFsr4();
     const bool use_taa = BbSettings::Get().upscaler == BbSettings::UpscalerTaa;
+    const bool use_metalfx = BbSettings::Get().upscaler == BbSettings::UpscalerMetalFx;
     if (use_taa && (w != ow || h != oh)) {
         std::printf("TAA: remove BB_RENDER_RES to use native-resolution TAA\n");
         return false;
     }
     if (resources_ready && w == width && h == height && ow == out_width && oh == out_height &&
-        hdr == context_hdr && use_fsr4 == resources_fsr4 && use_taa == resources_taa) {
+        hdr == context_hdr && use_fsr4 == resources_fsr4 && use_taa == resources_taa &&
+        use_metalfx == resources_metalfx) {
         return true;
     }
     const auto device = instance.GetDevice();
@@ -380,6 +387,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         ffxVkPortableUpscaleContextDestroy(context);
         context = nullptr;
     }
+    BbMetalFx::Release(); // its output image is recreated below
     width = w;
     height = h;
     out_width = ow;
@@ -407,8 +415,8 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
                             : 0;
     create_info.maxRenderSize = {w, h};
     create_info.maxOutputSize = {ow, oh};
-    // FSR 4 has its own model context (vk_fsr4); the images below are shared.
-    if (!use_fsr4 && !use_taa) {
+    // FSR 4 has its own model context (vk_fsr4), MetalFX its scaler; the images are shared.
+    if (!use_fsr4 && !use_taa && !use_metalfx) {
         if (const u64 issues = ffxVkPortableValidateUpscaleCreateInfo(&create_info)) {
             PrintIssues("create info", issues);
             return false;
@@ -445,8 +453,10 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,
         .tiling = vk::ImageTiling::eOptimal,
+        // bbport: MetalFX writes its output as a render target.
         .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
-                 vk::ImageUsageFlagBits::eTransferSrc,
+                 vk::ImageUsageFlagBits::eTransferSrc |
+                 (use_metalfx ? vk::ImageUsageFlagBits::eColorAttachment : vk::ImageUsageFlags{}),
         .initialLayout = vk::ImageLayout::eUndefined,
     });
     output_view = Check(device.createImageViewUnique({
@@ -509,6 +519,7 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     resources_ready = true;
     resources_fsr4 = use_fsr4;
     resources_taa = use_taa;
+    resources_metalfx = use_metalfx;
     if (use_taa) {
         std::printf("TAA: context %ux%u -> %ux%u (%s), no FSR model\n", w, h, ow, oh,
                     hdr ? "HDR scene color" : "tonemapped frame");
@@ -1032,7 +1043,8 @@ void TemporalUpscaler::Run() {
         input_color_view = c.view;
         input_depth_view = d.view;
     }
-    const auto cmdbuf = scheduler.CommandBuffer();
+    // Not const: MetalFX submits the frame so far, recording continues in a new buffer.
+    auto cmdbuf = scheduler.CommandBuffer();
 
     const auto own_barrier = [&](vk::Image image, vk::ImageLayout old_layout,
                                  vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access,
@@ -1080,6 +1092,40 @@ void TemporalUpscaler::Run() {
     } else if (UseFsr4()) {
         dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
                                 {input_depth, input_depth_view, w, h}, w, h, ow, oh, frame_ms);
+    } else if (BbSettings::Get().upscaler == BbSettings::UpscalerMetalFx) {
+        // bbport: MetalFX encodes into its own Metal command buffer on MoltenVK's queue, so the
+        // Vulkan work that wrote color, depth and motion is submitted first (commit order).
+        static const float jitter_sign = [] {
+            const char* env = std::getenv("BB_METALFX_JITTER_SIGN");
+            return env ? float(std::atof(env)) : 1.0f;
+        }();
+        scheduler.Flush();
+        {
+            std::scoped_lock lk{Scheduler::submit_mutex};
+            dispatched = BbMetalFx::Encode({
+                .device = instance.GetDevice(),
+                .get_device_proc_addr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
+                .queue = instance.GetGraphicsQueue(),
+                .color = input_color,
+                .depth = input_depth,
+                .motion = vk::Image(motion_image),
+                .output = vk::Image(output_image),
+                .width = w,
+                .height = h,
+                .out_width = ow,
+                .out_height = oh,
+                .jitter_x = jitter_sign * jitter[0],
+                .jitter_y = jitter_sign * jitter[1],
+                .motion_scale_x = 1.0f,
+                .motion_scale_y = 1.0f,
+                .reset = reset,
+                .hdr = true,
+            });
+        }
+        cmdbuf = scheduler.CommandBuffer();
+        if (!dispatched) {
+            failed = true; // logged by BbMetalFx; the frame stays at render size
+        }
     } else {
         FfxVkPortableUpscaleDispatchInfo info{};
         info.structSize = sizeof(info);
@@ -1560,7 +1606,7 @@ void TemporalUpscaler::RunScaled() {
     }
 
     scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
+    auto cmdbuf = scheduler.CommandBuffer(); // MetalFX submits mid-frame
     const auto barrier = [&](vk::Image image, vk::ImageAspectFlags aspect,
                              vk::ImageLayout old_layout, vk::PipelineStageFlags2 src_stage,
                              vk::AccessFlags2 src_access, vk::ImageLayout new_layout,
@@ -1600,13 +1646,43 @@ void TemporalUpscaler::RunScaled() {
     last_frame = now;
 
     // bbport: FSR 4 writes its HDR-format output, copied into the output-size UI image.
-    if (UseFsr4() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
+    const bool metalfx = BbSettings::Get().upscaler == BbSettings::UpscalerMetalFx;
+    if (UseFsr4() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa || metalfx) {
         barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
                 vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
         if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
             RecordTaa(cmdbuf, color_view, depth_view);
+        } else if (metalfx) {
+            // bbport: as in Run(); the tonemapped frame, so no auto exposure.
+            scheduler.Flush();
+            {
+                std::scoped_lock lk{Scheduler::submit_mutex};
+                ok4 = BbMetalFx::Encode({
+                    .device = instance.GetDevice(),
+                    .get_device_proc_addr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
+                    .queue = instance.GetGraphicsQueue(),
+                    .color = color_image,
+                    .depth = depth_image,
+                    .motion = vk::Image(motion_image),
+                    .output = vk::Image(output_image),
+                    .width = w,
+                    .height = h,
+                    .out_width = ow,
+                    .out_height = oh,
+                    .jitter_x = jitter[0],
+                    .jitter_y = jitter[1],
+                    .motion_scale_x = 1.0f,
+                    .motion_scale_y = 1.0f,
+                    .reset = reset,
+                    .hdr = false,
+                });
+            }
+            cmdbuf = scheduler.CommandBuffer();
+            if (!ok4) {
+                failed = true;
+            }
         } else {
             ok4 = RecordFsr4(cmdbuf, {color_image, color_view, source_width, source_height},
                             {depth_image, depth_view, source_width, source_height}, w, h, ow,

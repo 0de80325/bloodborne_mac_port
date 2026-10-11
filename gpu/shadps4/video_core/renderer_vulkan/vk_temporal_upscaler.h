@@ -242,6 +242,7 @@ private:
     bool resources_ready = false; ///< images below match width/height/out size
     bool resources_fsr4 = false;  ///< made for FSR 4 (no FSR 3 context)
     bool resources_taa = false;
+    bool resources_metalfx = false; ///< made for MetalFX (no FSR 3 context)
     std::unique_ptr<Fsr4Upscaler> fsr4;
     bool fsr4_failed = false;
     VideoCore::UniqueImage motion_image;

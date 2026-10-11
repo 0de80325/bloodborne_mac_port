@@ -256,6 +256,7 @@ bool Instance::CreateDevice() {
 #ifdef __APPLE__
     // bbport: required on portability (MoltenVK) devices.
     add_extension("VK_KHR_portability_subset");
+    metal_objects = add_extension(VK_EXT_METAL_OBJECTS_EXTENSION_NAME); // MetalFX
 #endif
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);

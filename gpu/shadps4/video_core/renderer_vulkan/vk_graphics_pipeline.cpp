@@ -422,6 +422,16 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+#ifdef __APPLE__
+    // bbport: Metal rejects some stage combinations desktop drivers accept (a fragment input the
+    // vertex stage does not write, e.g. when a geometry stage was skipped; clashing buffer
+    // indices). The pipeline stays null and its draws are skipped (docs/MACOS_BACKLOG.md).
+    if (pipeline_result != vk::Result::eSuccess) {
+        LOG_ERROR(Render_Vulkan, "Graphics pipeline {} rejected ({}): its draws are skipped",
+                  debug_str, vk::to_string(pipeline_result));
+        return;
+    }
+#endif
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);

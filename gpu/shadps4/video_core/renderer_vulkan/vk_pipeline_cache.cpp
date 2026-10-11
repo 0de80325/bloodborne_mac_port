@@ -410,7 +410,7 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() ? it->second.get() : nullptr;
+    return it != graphics_pipelines.end() && it->second->Handle() ? it->second.get() : nullptr;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -450,7 +450,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         sel.fetch_shader.reset();
     }
-    return it->second.get();
+    return it->second->Handle() ? it->second.get() : nullptr; // null: rejected by the driver
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {

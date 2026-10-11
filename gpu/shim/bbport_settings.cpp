@@ -130,11 +130,16 @@ void Load() {
     v.startup_live_resolution = v.live_resolution;
 }
 
-void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
+void ConfigureUpscalerSupport(bool fsr4, bool fsr411, bool metalfx) {
     auto& v = Get();
     v.fsr4_supported = fsr4;
     v.fsr411_supported = fsr4 && fsr411;
+    v.metalfx_supported = metalfx;
     const int requested = v.upscaler;
+    if (requested == UpscalerMetalFx && !metalfx) {
+        std::printf("Upscaler: MetalFX unavailable; falling back to FSR 3.1\n");
+        v.upscaler = UpscalerFsr3;
+    }
     if ((requested == UpscalerFsr4 && !v.fsr4_supported) ||
         (requested == UpscalerFsr411 && !v.fsr411_supported)) {
         v.fsr4_problem = "GPU does not support the selected FSR 4 shaders; using FSR 3.1";
@@ -206,7 +211,7 @@ const char* PresetName(int preset) {
 }
 
 const char* UpscalerName(int upscaler) {
-    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa"};
+    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "metalfx"};
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
 }
 

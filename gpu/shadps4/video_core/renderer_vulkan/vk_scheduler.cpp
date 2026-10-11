@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
+#include <mutex>
+#include <string>
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -56,9 +58,121 @@ Scheduler::~Scheduler() {
 #endif
 }
 
+namespace {
+// bbport: why render passes end (BB_PASS_STATS=1). On a tile-based GPU (Apple) each pass loads
+// and stores its attachments, so the count per frame matters (docs/MACOS_BACKLOG.md).
+const bool pass_stats = [] {
+    const char* env = std::getenv("BB_PASS_STATS");
+    return env && env[0] == '1';
+}();
+std::mutex pass_stats_mutex;
+std::unordered_map<std::string, u64> pass_ends;
+std::unordered_map<std::string, u64> pass_resumes; // the next pass reopened the same attachments
+std::string last_end_reason;
+u64 pass_begins;
+auto pass_stats_since = std::chrono::steady_clock::now();
+
+void CountPass(const std::string* end_reason, bool begin) {
+    std::scoped_lock lk{pass_stats_mutex};
+    if (end_reason) {
+        ++pass_ends[*end_reason];
+        last_end_reason = *end_reason;
+    }
+    pass_begins += begin;
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - pass_stats_since).count();
+    if (seconds < 2.0) {
+        return;
+    }
+    std::vector<std::pair<u64, std::string>> top;
+    u64 total = 0;
+    for (const auto& [reason, count] : pass_ends) {
+        top.emplace_back(count, reason);
+        total += count;
+    }
+    std::ranges::sort(top, std::greater{});
+    std::printf("Render passes: %.0f begins/s, %.0f ends/s by reason:\n", pass_begins / seconds,
+                total / seconds);
+    for (size_t i = 0; i < std::min<size_t>(top.size(), 14); ++i) {
+        std::printf("  %7.0f/s  %s\n", top[i].first / seconds, top[i].second.c_str());
+    }
+    std::vector<std::pair<u64, std::string>> resumed;
+    u64 resumed_total = 0;
+    for (const auto& [reason, count] : pass_resumes) {
+        resumed.emplace_back(count, reason);
+        resumed_total += count;
+    }
+    std::ranges::sort(resumed, std::greater{});
+    std::printf("  split passes (same attachments reopened next): %.0f/s, after:\n",
+                resumed_total / seconds);
+    for (size_t i = 0; i < std::min<size_t>(resumed.size(), 10); ++i) {
+        std::printf("  %7.0f/s  %s\n", resumed[i].first / seconds, resumed[i].second.c_str());
+    }
+    pass_resumes.clear();
+    pass_ends.clear();
+    pass_begins = 0;
+    pass_stats_since = now;
+}
+
+std::string Where(const std::source_location& where) {
+    std::string_view file = where.file_name();
+    if (const auto slash = file.rfind('/'); slash != std::string_view::npos) {
+        file.remove_prefix(slash + 1);
+    }
+    return std::string(file) + ":" + std::to_string(where.line()) + " " + where.function_name();
+}
+
+bool SameAttachments(const RenderState& a, const RenderState& b) {
+    if (a.num_color_attachments != b.num_color_attachments ||
+        a.depth_stencil_attachment.image_view != b.depth_stencil_attachment.image_view ||
+        a.width != b.width || a.height != b.height || a.num_layers != b.num_layers) {
+        return false;
+    }
+    for (u32 i = 0; i < a.num_color_attachments; ++i) {
+        if (a.color_attachments[i].image_view != b.color_attachments[i].image_view) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// What differs between two render states, for BB_PASS_STATS.
+std::string StateChange(const RenderState& a, const RenderState& b) {
+    bool views = a.num_color_attachments != b.num_color_attachments ||
+                 a.depth_stencil_attachment.image_view != b.depth_stencil_attachment.image_view ||
+                 a.width != b.width || a.height != b.height || a.num_layers != b.num_layers;
+    for (u32 i = 0; !views && i < a.num_color_attachments; ++i) {
+        views = a.color_attachments[i].image_view != b.color_attachments[i].image_view;
+    }
+    if (views) {
+        return "BeginRendering: other attachments/size";
+    }
+    bool layouts = a.depth_stencil_attachment.image_layout != b.depth_stencil_attachment.image_layout;
+    for (u32 i = 0; !layouts && i < a.num_color_attachments; ++i) {
+        layouts = a.color_attachments[i].image_layout != b.color_attachments[i].image_layout;
+    }
+    if (layouts) {
+        return "BeginRendering: same attachments, other layout";
+    }
+    return "BeginRendering: same attachments, clear/flags differ";
+}
+} // namespace
+
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
+    }
+    if (pass_stats) {
+        if (!is_rendering && SameAttachments(render_state, new_state)) {
+            std::scoped_lock lk{pass_stats_mutex};
+            ++pass_resumes[last_end_reason];
+        }
+        const std::string reason = StateChange(render_state, new_state);
+        CountPass(is_rendering ? &reason : nullptr, true);
+        if (is_rendering) {
+            is_rendering = false; // counted above, not again in EndRendering
+            Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+        }
     }
     EndRendering();
     is_rendering = true;
@@ -126,9 +240,13 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     });
 }
 
-void Scheduler::EndRendering() {
+void Scheduler::EndRendering(std::source_location where, const char* detail) {
     if (!is_rendering) {
         return;
+    }
+    if (pass_stats) {
+        const std::string reason = Where(where) + detail;
+        CountPass(&reason, false);
     }
     is_rendering = false;
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });

@@ -98,9 +98,16 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     // macOS); Metal commits its memory as it is touched, so the unused part costs nothing.
     // Requests outside it stop in GetArena (docs/MACOS_BACKLOG.md: per-page arenas).
     const u64 first_page = MacArenaBase >> ARENA_PAGE_BITS;
-    const auto* arena = &arenas.emplace_back(instance, MacArenaBase, MacArenaPages << ARENA_PAGE_BITS,
+    // BB_ARENA_GIB (multiple of 4): smaller arenas for tools that snapshot every buffer (Metal
+    // frame capture fails on the full size).
+    const u64 arena_pages = [] {
+        const char* env = std::getenv("BB_ARENA_GIB");
+        const u64 gib = env ? std::strtoull(env, nullptr, 10) : 0;
+        return gib >= 4 ? std::min<u64>(gib / 4, 6) : MacArenaPages;
+    }();
+    const auto* arena = &arenas.emplace_back(instance, MacArenaBase, arena_pages << ARENA_PAGE_BITS,
                                              MemoryType::DeviceLocal, "Guest Arena");
-    for (u64 page = 0; page < MacArenaPages; ++page) {
+    for (u64 page = 0; page < arena_pages; ++page) {
         address_space[first_page + page] = arena;
     }
 #endif

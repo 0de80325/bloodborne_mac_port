@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <span>
 #include <utility>
 #include <vector>
@@ -691,8 +692,9 @@ public:
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
-    /// Ends current rendering scope.
-    void EndRendering();
+    /// Ends current rendering scope. bbport: the caller is counted with BB_PASS_STATS=1.
+    void EndRendering(std::source_location where = std::source_location::current(),
+                      const char* detail = "");
 
     /// Sets a function to be called on every scheduler submission.
     void SetSubmitCallback(SubmitFunc&& on_submit) {
@@ -816,6 +818,11 @@ public:
     /// the write cannot overtake an earlier fence. Otherwise the guest, seeing the later value,
     /// may free memory the earlier fence then writes into (corrupted heap, guest fault).
     void WaitDeferredSignals();
+
+    /// Whether a render pass is open.
+    [[nodiscard]] bool IsRendering() const {
+        return is_rendering;
+    }
 
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {

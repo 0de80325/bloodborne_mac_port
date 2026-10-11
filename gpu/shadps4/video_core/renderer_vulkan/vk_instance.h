@@ -194,6 +194,11 @@ public:
         return amd_shader_explicit_vertex_parameter;
     }
 
+    /// bbport: VK_EXT_metal_objects (macOS): Metal objects behind Vulkan ones, for MetalFX.
+    bool IsMetalObjectsSupported() const {
+        return metal_objects;
+    }
+
     /// bbport: false on MoltenVK; null bindings then need dummy resources.
     bool IsNullDescriptorSupported() const {
         return null_descriptor;
@@ -563,6 +568,7 @@ private:
     bool list_restart{};
     bool robust_buffer_access2{};
     bool null_descriptor{};
+    bool metal_objects{};
     bool provoking_vertex{};
     bool shader_stencil_export{};
     bool image_load_store_lod{};

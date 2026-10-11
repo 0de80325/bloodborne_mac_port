@@ -149,6 +149,12 @@ target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_pa
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 if (APPLE)
+    # bbport: one-frame Metal GPU capture (shim/bbport_gpu_capture.h).
+    enable_language(OBJCXX)
+    # MetalFX temporal upscaling (shim/bbport_metalfx.h).
+    target_sources(bbgpu PRIVATE shim/bbport_gpu_capture.mm shim/bbport_metalfx.mm)
+    set_source_files_properties(shim/bbport_gpu_capture.mm shim/bbport_metalfx.mm
+                                PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe at load time.
     target_link_options(bbgpu PRIVATE -Wl,-undefined,dynamic_lookup)
     target_compile_definitions(bbgpu PRIVATE VK_USE_PLATFORM_METAL_EXT)
@@ -160,7 +166,7 @@ target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vu
 if (APPLE)
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
         tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit
-        "-framework Metal" "-framework QuartzCore")
+        "-framework Metal" "-framework MetalFX" "-framework QuartzCore" "-framework Foundation")
 else()
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
         tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)

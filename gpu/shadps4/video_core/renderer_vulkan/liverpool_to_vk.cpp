@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include "common/assert.h"
 #include "common/number_utils.h"
 #include "video_core/amdgpu/pixel_format.h"
@@ -788,6 +789,25 @@ vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat nu
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
     bool found =
         result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
+#ifdef __APPLE__
+    // bbport: an impossible combination (e.g. 8_8_8_8 with Float numbers) comes from a garbage or
+    // unused descriptor; stopping helps no player. Same-size stand-in, logged once per kind.
+    if (!found) {
+        static std::atomic<u64> logged{0};
+        const u64 bit = u64{1} << ((static_cast<u32>(data_format) * 7 + static_cast<u32>(num_format)) % 64);
+        if (!(logged.fetch_or(bit) & bit)) {
+            LOG_ERROR(Render_Vulkan, "Unknown data_format={} and num_format={}: using a stand-in",
+                      static_cast<u32>(data_format), static_cast<u32>(num_format));
+        }
+        switch (AmdGpu::NumBitsPerBlock(data_format)) {
+        case 8: return vk::Format::eR8Unorm;
+        case 16: return vk::Format::eR8G8Unorm;
+        case 64: return vk::Format::eR16G16B16A16Unorm;
+        case 128: return vk::Format::eR32G32B32A32Uint;
+        default: return vk::Format::eR8G8B8A8Unorm;
+        }
+    }
+#endif
     ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
                static_cast<u32>(num_format));
     return result;

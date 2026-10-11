@@ -70,7 +70,9 @@ python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(g
 - [x] GPU boot on MoltenVK: character creation, save, first level loads and plays (2026-10-11)
 - [ ] Rendering gaps (ghosting halo), job-pool crash, performance
 - [ ] GPU on MoltenVK; fix rendering gaps
-- [ ] MetalFX upscaling, zero-copy guest memory
+- [x] MetalFX temporal upscaling (upscaler `metalfx`; 1080p presets render the whole frame
+  smaller on macOS) (2026-10-11)
+- [ ] Zero-copy guest memory
 - [ ] Launcher and `.app` bundle
 
 Session handoff notes for Claude Code live in [`CLAUDE.md`](../CLAUDE.md).

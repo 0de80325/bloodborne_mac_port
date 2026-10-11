@@ -44,7 +44,7 @@ class BufferCache {
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
 #ifdef __APPLE__
     static constexpr u64 MacArenaBase = 0x7000000000; ///< runtime_memory.c USER_MIN (macOS)
-    static constexpr u64 MacArenaPages = 4;           ///< 16 GiB of guest GPU address space
+    static constexpr u64 MacArenaPages = 4; ///< 16 GiB of guest GPU address space (BB_ARENA_GIB)
 #endif
 
 public:

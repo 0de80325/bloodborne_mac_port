@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_gpu_capture.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -686,6 +687,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
+    BbGpuCapture::OnPresent(); // bbport: BB_GPU_CAPTURE one-frame Metal capture
 
     free_frame();
     if (!is_reusing_frame && is_game_frame) {

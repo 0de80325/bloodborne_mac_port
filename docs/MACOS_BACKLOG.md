@@ -33,6 +33,12 @@ Each item: what was done for now, what the refinement is, and where it lives.
   0x263b246) instead of a clean exit. Only test runs with a timeout are affected; normal play
   has none. *Refinement:* find why the dump signal derails the interrupted guest thread
   (signal delivery under Rosetta with the guest stack/TLS) and exit cleanly.
+- **Character half-rendered after reloading a save (user report, 2026-10-11).** Repro: quit to the
+  main menu, reload the save point; the character loads with the top half drawn and the bottom
+  half missing. Suspects: pipelines skipped on Metal (`Graphics pipeline … rejected`, geometry
+  stages skipped by MoltenVK) or stale buffer-cache/arena contents for re-used guest memory
+  after the reload (macOS arena has no sparse unbind). Also: the ghosting halo in character
+  creation (Mac GUI/visual list above).
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.
@@ -50,6 +56,14 @@ Each item: what was done for now, what the refinement is, and where it lives.
   Desktop GPUs barely pay for pass breaks; Apple TBDR does. *Refinement:* log why rendering
   ends between draws (barriers, layout changes, copies/clears, compute), merge passes with the
   same attachments, use DONT_CARE load/store where contents are dead.
+- **Measured 2026-10-11, correcting the pass-count theory:** of ~287 fragment passes per frame,
+  62% take <0.02 ms (3.5% of GPU time); 15% take 0.25–2 ms and hold ~72% — the cost is real
+  shading in heavy passes (game defaults; port extras are off), not TBDR load/store. Only ~18% of
+  passes are needless splits (same attachments reopened, 85% after buffer copies).
+  Per-pass timing tools that do NOT work here: `BB_GPU_PROFILE=1` (MoltenVK timestamps read 0),
+  `BB_VK_MARKERS=1` (per-draw labels only), Xcode attach (process list hangs), Metal frame
+  capture `BB_GPU_CAPTURE=<s>` + `METAL_CAPTURE_ENABLED=1` (Apple's capture crashes in
+  `DownloadHeap`, also with `BB_ARENA_GIB=8`).
 - Other measured costs: MoltenVK encodes Metal commands inside `vkQueueSubmit` (~47% of the
   recording thread; `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0` moves it off, small gain while
   GPU-bound); draw-prep pool lock contention + background QoS on E-cores
@@ -64,6 +78,9 @@ Each item: what was done for now, what the refinement is, and where it lives.
   removes uploads, read-backs and most write tracking. Mind CPU/GPU coherence and the Rosetta
   aliased-code caveat (Stability).
 
+- **MetalFX with asynchronous submits.** *Now:* MetalFX encodes on MoltenVK's queue right after
+  a synchronous `vkQueueSubmit` (commit order). *Refinement:* order it with an MTLSharedEvent
+  (exported timeline semaphore) so `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0` can be used.
 - **PGO on macOS:** profile-guided optimization is off (the profiles are GCC `.gcda`).
   *Refinement:* clang `-fprofile-generate`/`-fprofile-use` with `.profdata`.
 
@@ -73,4 +90,6 @@ Each item: what was done for now, what the refinement is, and where it lives.
   English, opens with ⌘, or L3+R3 and shows FPS, render → output resolution and upscaler.
   *Refinement:* a native Mac settings window in the launcher; if SDL's default app menu
   swallows ⌘, (its "Preferences…" item), wire that menu item to the overlay instead.
+- **Menu bugs on macOS.** "Subpixel jitter" ticks then unticks itself; upscaler/preset choices
+  made in the menu were not what bbport.ini held afterwards (found upscaler=off, preset=0).
 - **Launcher and `.app` bundle** (planned in `MACOS_PORT.md`).

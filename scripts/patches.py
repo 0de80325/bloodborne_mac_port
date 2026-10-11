@@ -138,12 +138,19 @@ def scaled_sizes(settings):
     the game renders at output / preset scale (or at the output size without upscaler) and the
     upscaler fills the output. None at 1080p and for TAA (native, live host targets only)."""
     out=output_size(settings)
-    if out==OUTPUT_SIZE or settings.get('upscaler')=='taa': return None
+    if settings.get('upscaler')=='taa': return None
+    if out==OUTPUT_SIZE:
+        # 1080p: presets run live (scene proxies), except on macOS, where the proxies' copies
+        # cancel the saving on a pixel-bound GPU: the whole frame renders at the preset size
+        # (a restart per preset change). live_resolution=1 keeps the live path there too.
+        if sys.platform!='darwin' or settings.get('live_resolution')=='1': return None
+        if settings.get('upscaler','fsr3')=='off': return None
     scale=1.0
     if settings.get('upscaler','fsr3')!='off':
         preset=int(settings.get('preset','0') or 0)
         scale=PRESET_SCALES[max(0,min(preset,len(PRESET_SCALES)-1))]
     render=tuple(max(2,round(v/scale/2)*2) for v in out)
+    if out==OUTPUT_SIZE and render==OUTPUT_SIZE: return None # native AA: nothing to patch
     # A scene of exactly 1920x1080 (4K Performance) is indistinguishable from the game's UI
     # coordinate space, which the port's UI composition recognizes by that size.
     if render==OUTPUT_SIZE: render=(1916,1078)

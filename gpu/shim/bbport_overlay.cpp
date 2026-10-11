@@ -204,13 +204,14 @@ void Menu() {
 
     ImGui::SeparatorText("Temporal Upscaler");
     static const char* upscalers[] = {"Off", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
-                                     "TAA (native anti-aliasing)"};
+                                     "TAA (native anti-aliasing)", "MetalFX (Apple)"};
     static const char* later[] = {"DLSS", "XeSS"};
     int upscaler = s.upscaler;
     if (ImGui::BeginCombo("Upscaler", upscalers[upscaler])) {
         for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
             const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
-                : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load() : true;
+                : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
+                : i == BbSettings::UpscalerMetalFx ? s.metalfx_supported.load() : true;
             ImGui::BeginDisabled(!supported);
             if (ImGui::Selectable(upscalers[i], i == upscaler)) {
                 Store(s.upscaler, i, true);
@@ -448,6 +449,7 @@ void FpsCounter() {
                            : s.upscaler == BbSettings::UpscalerFsr4   ? "FSR 4"
                            : s.upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
                            : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
+                           : s.upscaler == BbSettings::UpscalerMetalFx ? "MetalFX"
                                                                       : "";
     const int output = BbSettings::FixedRenderSession() ? s.startup_output_res : s.output_res.load();
     const int out_w = BbSettings::OutputWidths[output], out_h = BbSettings::OutputHeights[output];

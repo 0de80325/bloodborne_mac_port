@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string>
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -813,7 +814,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
 
-void Runtime::FlushBarriers() {
+void Runtime::FlushBarriers(std::source_location where) {
     BeforeImageAccess();
     vk::DependencyInfo dep_info{};
 
@@ -830,7 +831,28 @@ void Runtime::FlushBarriers() {
         return;
     }
 
-    scheduler.EndRendering();
+    // bbport: BB_PASS_STATS names the caller and the kind of barrier ending the pass (for image
+    // barriers: the first transition and its access masks).
+    static const bool pass_stats = [] {
+        const char* env = std::getenv("BB_PASS_STATS");
+        return env && env[0] == '1';
+    }();
+    if (pass_stats && scheduler.IsRendering()) {
+        std::string detail = dep_info.imageMemoryBarrierCount
+                                 ? (dep_info.memoryBarrierCount ? " [image+memory] " : " [image] ")
+                                 : " [memory]";
+        if (dep_info.imageMemoryBarrierCount) {
+            const auto& b = image_barriers[0];
+            detail += vk::to_string(b.oldLayout) + "->" + vk::to_string(b.newLayout) + " (" +
+                      vk::to_string(b.srcAccessMask) + " -> " + vk::to_string(b.dstAccessMask) +
+                      ") x" + std::to_string(image_barriers.size());
+        }
+        static thread_local std::string stable;
+        stable = std::move(detail);
+        scheduler.EndRendering(where, stable.c_str());
+    } else {
+        scheduler.EndRendering(where);
+    }
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
                       images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
                           image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {

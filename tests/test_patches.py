@@ -1,7 +1,9 @@
 from paths import ROOT
 import struct
+import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -75,7 +77,8 @@ class NativeUiTests(unittest.TestCase):
         self.assertIsNone(render_size({'upscaler': 'off', 'preset': '3'}))
 
     def test_output_other_than_1080p_scales_the_scene(self):
-        self.assertIsNone(scaled_sizes({'output_res': '1920x1080', 'preset': '2'}))
+        with mock.patch.object(sys, 'platform', 'linux'):
+            self.assertIsNone(scaled_sizes({'output_res': '1920x1080', 'preset': '2'}))
         # Steam Deck: below 1080p the scene is still the preset's fraction of the output.
         for preset, expected in [(0, (1280, 720)), (2, (752, 424)), (4, (426, 240))]:
             with self.subTest(preset=preset):
@@ -83,6 +86,16 @@ class NativeUiTests(unittest.TestCase):
                                  (expected, (1280, 720)))
         self.assertEqual(scaled_sizes({'output_res': '3840x2160', 'preset': '3'}),
                          ((1916, 1078), (3840, 2160)))
+
+    def test_macos_patches_1080p_presets_unless_live(self):
+        with mock.patch.object(sys, 'platform', 'darwin'):
+            self.assertEqual(scaled_sizes({'output_res': '1920x1080', 'preset': '1'}),
+                             ((1280, 720), (1920, 1080)))
+            self.assertIsNone(scaled_sizes({'output_res': '1920x1080', 'preset': '0'}))
+            self.assertIsNone(scaled_sizes({'output_res': '1920x1080', 'preset': '2',
+                                            'live_resolution': '1'}))
+            self.assertIsNone(scaled_sizes({'output_res': '1920x1080', 'preset': '2',
+                                            'upscaler': 'off'}))
         # TAA is native-only and uses the live host targets.
         self.assertIsNone(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}))
 

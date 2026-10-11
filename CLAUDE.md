@@ -99,13 +99,23 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 - Run: `BB_DATA_DIR=$PWD/out/macdata BB_GAME_DIR=/Users/markhall/Bloodborne/CUSA03173
   BB_TIMEOUT=60 bash run.sh [--cpu-only]`; `BB_TRACE=1` logs unbound import calls.
 
+## Performance status (2026-10-11, same scene, user's M4 Max)
+
+Native 1080p 22→25 FPS; FSR 3.1 Quality (720p→1080p) 28→31; MetalFX Quality 27→30
+(sharper, more distant shimmer). At 720p the GPU is no longer the limit: the draw-recording
+CPU thread (`bb:DrawRec`, ~35–40 ms/frame: MoltenVK encoding in vkQueueSubmit ~47%, renderer
+per-draw work ~21%, host-copy spin ~12%) caps it. `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0` gave
+nothing measurable. MetalFX needs synchronous submits (commit order on MoltenVK's queue).
+Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini` via BB_CONFIG.
+
 ## Next steps (in order)
 
-1. Ghosting halo (character creation); null image bindings: 1x1 stand-in images (Option A).
-2. Performance: GPU-bound by ~287 render passes/frame on Apple TBDR — see MACOS_BACKLOG.md
-   Performance (first: log why each pass breaks). Tools: `sample <pid> 10`, Metal System Trace.
-3. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
-4. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
+1. CPU side of the draw thread: re-profile at 720p (`sample <pid> 10`) to see what dominates now.
+2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
+   as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
+3. Rendering: half-rendered character after reloading a save; ghosting in character creation;
+   null image stand-ins (Option A).
+4. Launcher / `.app` bundle.
 
 ## Gotchas learned
 
