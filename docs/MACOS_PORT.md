@@ -34,3 +34,15 @@ Graphics use a staged hybrid plan:
 - Xcode command line tools (Apple clang, targeting `x86_64-apple-macos`)
 - x86-64 Homebrew under `/usr/local` (Rosetta) for x86-64 SDL3 / MoltenVK / Vulkan loader
 - CMake, Ninja, Python 3.10+
+
+## Unpacking the game (`tools/pkg_extract`)
+
+A fake-signed `.pkg` dump can be unpacked natively with the bundled extractor (shadPS4's
+PKG/PFS code from before its removal, with 64-bit file sizes):
+
+```sh
+cmake -S tools/pkg_extract -B out/pkg_extract -G Ninja && ninja -C out/pkg_extract   # needs: brew install cryptopp pkgconf
+out/pkg_extract/pkg_extract <game.pkg>   <dir>                   # -> <dir>/CUSA03173
+out/pkg_extract/pkg_extract <update.pkg> <dir2>/CUSA03173-patch  # then copy its contents over the game folder
+python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(game_check.problem('<dir>/CUSA03173') or 'OK')"
+```
