@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **proposal for decision** (2026-10-11). Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0 spike passed — GO** (2026-10-11); M1 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 
@@ -69,6 +69,13 @@ The interface is already narrow (measured from the code):
 - The guest image and stacks are not GPU-visible and stay private to `bb-probe`.
 - This also realises the **zero-copy** backlog item: the host can import guest pages straight
   into Metal (`VK_EXT_external_memory_host`) instead of copying into a 16 GiB arena.
+- **Why this fits the hardware (owner's observation):** the PS4 has one unified memory pool
+  shared by CPU and GPU. The PC/Linux renderer copies guest memory into separate GPU buffers only
+  because discrete GPUs have their own VRAM — that is where the arena, uploads, write-tracking
+  faults and copy spin-waits come from. Apple Silicon is unified like the PS4, so guest pages can
+  be shared by the game process, the host process and the GPU at once. Caveat: **textures** still
+  need conversion (PS4 tiled layouts → linear/Metal), so the texture cache keeps detiling; buffers
+  (vertex, index, constants — most per-frame traffic) can be used in place.
 
 ### 3.2 Communication
 
@@ -145,6 +152,43 @@ The host's own views stay writable: protection only matters where the game runs.
 | M5 | Input, overlay, text input in the host | Fully playable |
 | M6 | AvPlayer, restart, crash handling, diagnostics | Feature parity with single-process |
 | M7 | Zero-copy textures/buffers from shared memory; remove the 16 GiB arena | Lower memory, fewer copies; benchmark |
+
+## M0 results (2026-10-11) — `tools/m0_spike/`
+
+**(c) Speed — `vulkan_bench/`.** One game-shaped Vulkan frame (1,690 draws, 270 dynamic-rendering
+passes, 1,785 push-descriptor sets, 95 dispatches, 60 submits), same source and the same universal
+MoltenVK, built x86-64 (Rosetta) and arm64:
+
+| ms/frame (median, 3×300 frames) | x86-64 (Rosetta) | arm64 | Speed-up |
+|---|---|---|---|
+| Recording | 0.99 | 0.50 | 2.00× |
+| `vkQueueSubmit` (MoltenVK encoding) | 5.55 | 3.23 | 1.72× |
+| **Frame CPU** | **6.55** | **3.73** | **1.75×** |
+| Generic renderer-style C++ micro-benchmark | | | 1.19× |
+
+Applied to the game's 720p `bb:DrawRec` profile: **~1.35–1.6× faster**, i.e. ~36–48 FPS from 27–30.
+Clears the 1.3× threshold (conservative end with little margin; waits don't speed up).
+
+**(a)+(b) Mechanics — `shared_mem/`.** All required mechanisms work between a Rosetta x86-64 and a
+native arm64 process:
+- Memory entry (`mach_make_memory_entry_64`) mapped at 0x7000000000 in both; aliases coherent;
+  parent-side read-only protection with the child's view writable; SIGBUS on parent writes.
+- Port hand-off via **`mach_ports_register` + inheritance** (the bootstrap special port is unusable:
+  libxpc caches it and the host needs launchd/XPC for Metal and the window server).
+- **Ordering:** release/acquire rings: 0 violations in 60M messages; relaxed indices: arm64 reads
+  stale payloads ~1 in 20–40k. Every native read of guest-produced data needs acquire semantics.
+- **Doorbells:** Mach semaphore / message round trip ~5 µs median (p99 ~9 µs); `os_sync` ~9 µs.
+- **Fault relay:** ~23–25 µs per fault vs ~17 µs in-process today (signal delivery under Rosetta
+  dominates) — ≤ 2% of a core at the measured 150–800 faults/s.
+
+**Design changes from M0:**
+1. Port hand-off via `mach_ports_register` (3.6).
+2. Guest-page release must act on the shared entry: today's `punch()` (fresh anonymous pages)
+   breaks sharing. Zeroing is only possible from the native side (`MADV_ZERO` fails under Rosetta)
+   and rounds to 16 KiB pages (the Rosetta side uses 4 KiB), so the host zeroes aligned 16 KiB
+   blocks and the runtime `memset`s unaligned edges (or just `memset`, ~25–45 µs/MiB).
+3. Doorbells: Mach semaphores/messages, not `os_sync`.
+4. Release/acquire on every cross-process handoff — confirmed mandatory by experiment.
 
 ## 5. Expected gain — honestly
 

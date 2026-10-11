@@ -111,7 +111,9 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 
 ## Next steps (in order)
 
-1. CPU side of the draw thread: re-profile at 720p (`sample <pid> 10`) to see what dominates now.
+1. **Native arm64 GPU process** (docs/DESIGN_NATIVE_GPU_PROCESS.md): M0 spike passed (1.75× on
+   MoltenVK-style CPU work). Next: M1 — guest memory on a shared Mach memory entry, single process,
+   no behaviour change (note `punch()` must act on the entry; see design "M0 results").
 2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
    as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
 3. Rendering: half-rendered character after reloading a save; ghosting in character creation;

@@ -34,3 +34,6 @@ test_th.*
 .DS_Store
 /game/
 /deps/
+
+# M0 spike build output
+tools/m0_spike/*/out/

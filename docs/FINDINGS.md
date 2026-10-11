@@ -162,6 +162,16 @@ Rendering 44% of the pixels gains only ~25%: at 720p **the GPU is no longer the 
 draw-recording CPU thread is** (~33–40 ms of work per frame). MetalFX and FSR are therefore
 equally fast.
 
+### Native-process feasibility spike (M0)
+
+See [`DESIGN_NATIVE_GPU_PROCESS.md`](DESIGN_NATIVE_GPU_PROCESS.md#m0-results-2026-10-11--toolsm0_spike):
+a game-shaped Vulkan frame costs **1.75× less CPU natively** than under Rosetta (MoltenVK
+encoding 1.72×, recording 2.0×; generic C++ only 1.19×); cross-process shared memory, protection,
+doorbells (~5 µs) and fault relays (~24 µs) all work.
+
+**Measurement gotcha:** under Rosetta, `CLOCK_THREAD_CPUTIME_ID` is badly wrong (reported 21 ms
+for 871 ms of work). Use `thread_info(THREAD_EXTENDED_INFO)` / Mach thread times instead.
+
 ## Part 3 — Open issues
 
 | Issue | Status |
