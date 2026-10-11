@@ -54,3 +54,17 @@ out/pkg_extract/pkg_extract <game.pkg>   <dir>                   # -> <dir>/CUSA
 out/pkg_extract/pkg_extract <update.pkg> <dir2>/CUSA03173-patch  # then copy its contents over the game folder
 python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(game_check.problem('<dir>/CUSA03173') or 'OK')"
 ```
+
+## Progress
+
+- [x] Repo, plan, README header (2026-10-11)
+- [x] `tools/pkg_extract` — game unpacked and verified as 1.09 (2026-10-11)
+- [x] x86-64 dependency bootstrap; MoltenVK verified under Rosetta (2026-10-11)
+- [ ] macOS build script for `gpu/` (bbgpu dylib) and the loader
+- [ ] Runtime port: TLS via pthread TSD slot, low memory, signals, futex, thread dumps
+- [ ] Boot with `--cpu-only`
+- [ ] GPU on MoltenVK; fix rendering gaps
+- [ ] MetalFX upscaling, zero-copy guest memory
+- [ ] Launcher and `.app` bundle
+
+Session handoff notes for Claude Code live in [`CLAUDE.md`](../CLAUDE.md).
