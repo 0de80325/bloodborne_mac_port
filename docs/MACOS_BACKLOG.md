@@ -21,6 +21,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *Refinement:* emit bounds checks in the SPIR-V backend (`shader_recompiler/backend/spirv`) for
   buffer loads/stores/atomics on macOS — targeted first (vertex fetch, storage buffers) where
   glitches trace back to OOB reads, everywhere if a native Metal backend is built.
+- **Buffer-cache arena window.** *Now:* one fully backed 16 GiB arena at 0x7000000000
+  (`BufferCache::MacArenaBase/MacArenaPages`); a GPU buffer outside it stops with "outside the
+  macOS guest arena". *Refinement:* per-page arenas with copy-based migration (rewriting the
+  BDA page table), or zero-copy import (Performance) which removes arenas altogether.
+- **Host pointers above 1 TiB reach the guest.** `__error` returns the host thread's errno
+  address (0x7fc6…), above the game's 40-bit pointer range. Harmless if used immediately; if
+  the game ever stores it packed, route errno through a per-thread low (<1 TiB) slot.
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.

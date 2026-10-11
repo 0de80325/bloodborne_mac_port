@@ -42,6 +42,10 @@ class BufferCache {
     static constexpr u64 ARENA_PAGE_SIZE = u64{1} << ARENA_PAGE_BITS;
     static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
+#ifdef __APPLE__
+    static constexpr u64 MacArenaBase = 0x7000000000; ///< runtime_memory.c USER_MIN (macOS)
+    static constexpr u64 MacArenaPages = 4;           ///< 16 GiB of guest GPU address space
+#endif
 
 public:
     /// Read-only bindings up to this size are copied into a stream buffer (bbport: public for

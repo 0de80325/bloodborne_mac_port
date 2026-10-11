@@ -72,6 +72,19 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 - GPU boot (`run.sh`, no flag): window + Vulkan instance OK; stops in `Instance::CreateDevice`
   (`vk_instance.cpp` ~272): MoltenVK lacks **`robustBufferAccess2`** and **`nullDescriptor`**
   (has `robustBufferAccess`, `robustImageAccess2`).
+- 2026-10-11 later: device created (Option A: no robustBufferAccess2/nullDescriptor, zero
+  stand-in buffer); buffer cache uses one ordinary 16 GiB arena at 0x7000000000 on macOS (no
+  sparse binding in MoltenVK; Metal commits memory lazily, measured). The window opens, the
+  DualSense connects, the game loads textures, then a worker thread faults: its job-pool loop
+  (guest 0x263b246) virtual-calls a malformed job object (one pointer level too many; target in
+  .data 0x53b3260). Root cause not found yet — suspects: macOS memory aliasing bug in
+  flexible memory (0x7109…), or an HLE call behaving differently. Fault handler now prints
+  rax/rbx/rdi/rsi/rsp; `BB_TRACE=1` adds import logs and thread snapshots.
+- MoltenVK cannot create BC1/BC7 images with Storage usage (`image.cpp:185` errors) — next
+  rendering gap after the crash.
+- A stale shader cache from a crashed run fails `serdes.h:109`; delete it. Test runs without
+  `<data>/user` existing put GPU caches in `~/Library/Application Support/shadPS4` (path_util
+  reads `BB_GPU_USER_DIR` at static init, before bbgpu_init sets it) — `mkdir out/macdata/user`.
 - macOS main thread: Cocoa needs the real main thread, so `probe.c` `main()` runs the game on a
   64 MiB-stack thread and runs `CFRunLoopRun()`; `bbgpu_init` posts the window loop to the main
   dispatch queue. (`dispatch_main()` does NOT work: SDL then reports "No available video device".)
@@ -80,10 +93,10 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 
 ## Next steps (in order)
 
-1. Device creation on MoltenVK: decide how to live without `robustBufferAccess2` /
-   `nullDescriptor` (relax asserts on Apple + dummy descriptors / shader-side bounds checks).
-2. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
-3. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
+1. Find the worker-thread job fault above (systematic debugging; compare memory aliasing).
+2. Null image bindings: 1x1 stand-in images (Option A, not done yet), BC + Storage on MoltenVK.
+3. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
+4. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
 
 ## Gotchas learned
 

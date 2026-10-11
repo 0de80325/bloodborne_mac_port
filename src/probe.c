@@ -40,6 +40,10 @@
 #define UC_rip REG_RIP
 #define UC_rbp REG_RBP
 #define UC_rdi REG_RDI
+#define UC_rax REG_RAX
+#define UC_rbx REG_RBX
+#define UC_rsi REG_RSI
+#define UC_rsp REG_RSP
 #endif
 #endif
 /* Mach-O prefixes C symbols with '_': top-level asm must name them through SYM(). */
@@ -1147,6 +1151,11 @@ static void fault(int sig, siginfo_t *info, void *context) {
                  (unsigned long)(rip - (uintptr_t)where.dli_fbase), where.dli_sname ? where.dli_sname : "?", info->si_addr);
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
+    { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    snprintf(line, sizeof(line), "  rax=%#llx rbx=%#llx rdi=%#llx rsi=%#llx rsp=%#llx\n",
+             (unsigned long long)UC_REG(uc, rax), (unsigned long long)UC_REG(uc, rbx),
+             (unsigned long long)UC_REG(uc, rdi), (unsigned long long)UC_REG(uc, rsi),
+             (unsigned long long)UC_REG(uc, rsp));
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Host call chain (frames with unwind info; guest frames end it). */

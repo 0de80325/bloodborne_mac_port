@@ -61,8 +61,10 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
     const vk::BufferCreateInfo probe_ci = {
+#ifndef __APPLE__
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+#endif
         .size = ARENA_PAGE_SIZE,
         .usage = ARENA_USAGE,
         .sharingMode = vk::SharingMode::eExclusive,
@@ -90,6 +92,18 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+#ifdef __APPLE__
+    // bbport: MoltenVK has no sparse binding. One ordinary arena covers the start of the guest
+    // GPU range instead (runtime_memory.c places guest memory from USER_MIN = 0x7000000000 on
+    // macOS); Metal commits its memory as it is touched, so the unused part costs nothing.
+    // Requests outside it stop in GetArena (docs/MACOS_BACKLOG.md: per-page arenas).
+    const u64 first_page = MacArenaBase >> ARENA_PAGE_BITS;
+    const auto* arena = &arenas.emplace_back(instance, MacArenaBase, MacArenaPages << ARENA_PAGE_BITS,
+                                             MemoryType::DeviceLocal, "Guest Arena");
+    for (u64 page = 0; page < MacArenaPages; ++page) {
+        address_space[first_page + page] = arena;
+    }
+#endif
 }
 
 BufferCache::~BufferCache() = default;
@@ -399,6 +413,11 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 
     const auto* first_arena = address_space[first_page];
     const auto* last_arena = address_space[last_page];
+#ifdef __APPLE__
+    ASSERT_MSG(first_arena && first_arena == last_arena,
+               "GPU buffer {:#x}..{:#x} outside the macOS guest arena",
+               first_block << block_shift, ((last_block + 1) << block_shift) - 1);
+#endif
     if (first_arena == last_arena) {
         if (!first_arena) {
             const u64 base_block = Common::AlignDownPow2<u64>(first_block, blocks_per_arena_page);
@@ -457,6 +476,27 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         return;
     }
     BbStats::Timer timer{BbStats::t_resident};
+#ifdef __APPLE__
+    // The arena is fully backed: residency only fills the BDA page table.
+    boost::container::small_vector<vk::BufferCopy, 8> copies;
+    const auto staging =
+        staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
+    auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
+    u64 offset = staging.offset;
+    for (const auto& range : bind_ranges) {
+        resident_ranges.Add(Backing{{range.start, range.end}, vk::DeviceMemory{}, range.start});
+        const u64 resource_offset = (range.start << block_shift) - arena->cpu_addr;
+        for (u64 block = range.start; block < range.end; ++block) {
+            *(bda_addrs++) = arena->BufferDeviceAddress() + resource_offset +
+                             ((block - range.start) << block_shift);
+        }
+        const u64 copy_size = (range.end - range.start) * sizeof(vk::DeviceAddress);
+        copies.emplace_back(offset, range.start * sizeof(vk::DeviceAddress), copy_size);
+        offset += copy_size;
+    }
+    staging.Flush();
+    runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+#else
 
     const vk::MemoryAllocateInfo alloc_info = {
         .allocationSize = resident_blocks << block_shift,
@@ -500,6 +540,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+#endif
 }
 
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,
