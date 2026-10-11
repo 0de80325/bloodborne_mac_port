@@ -144,6 +144,20 @@ patch the game to render the whole frame at the preset size (a restart per chang
 | FSR 3.1 Quality + async submits | 27 → 31 | Same as without |
 | FSR 3.1 Balanced (live path, earlier, different scene) | 38–45 | Not comparable (different scene and path) |
 
+**Profile at 720p (MetalFX Quality, `sample` of `bb:DrawRec`):** ~51% inside `vkQueueSubmit`
+(MoltenVK encoding Vulkan → Metal, incl. 8% creating Metal render encoders and ~15% per-draw
+state/descriptors), ~11% spin-waiting on host copies, ~6% idle, and only ~9% the renderer's own
+per-draw work. The GPU command thread spends ~73% waiting for `bb:DrawRec`; the Vulkan recorder
+thread is ~76% idle.
+
+| Experiment at 720p | Result |
+|---|---|
+| `MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2` (encode on the recorder thread as recorded) | 27 → 30 FPS, unchanged |
+
+The frame is effectively serialised through Rosetta-translated code: the draw thread regularly
+syncs with the recorder thread (direct command-buffer access), so moving MoltenVK's encoding to
+another thread moves the wait, not the work.
+
 Rendering 44% of the pixels gains only ~25%: at 720p **the GPU is no longer the limit — the
 draw-recording CPU thread is** (~33–40 ms of work per frame). MetalFX and FSR are therefore
 equally fast.
