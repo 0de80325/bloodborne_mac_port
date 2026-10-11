@@ -31,3 +31,5 @@ scratch/
 test_th.*
 .vscode/
 .idea/
+.DS_Store
+/game/

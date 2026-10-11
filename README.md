@@ -1,3 +1,14 @@
+# bloodborne_mac_port: macOS (Apple Silicon) Port of Bloodborne — WIP
+
+> **This repository is a work-in-progress macOS port** of [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port)
+> (itself based on `bbport` by `deadinside28`). It does **not run on macOS yet**. The plan: build the loader,
+> runtime and GPU core as x86-64 and run under Rosetta 2, render through MoltenVK, then add Metal-native
+> features (MetalFX, zero-copy unified memory). See [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
+>
+> No game files are included; you must supply your own decrypted dump. The original Windows README follows.
+
+---
+
 # bloodborne_pc_windows_port: Native Windows Port of Bloodborne
 
 `bloodborne_pc_windows_port` is a native 64-bit Windows port of the PlayStation 4 executable of *Bloodborne* (CUSA03173, version 1.09). 
