@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **M0 spike passed — GO** (2026-10-11); M1 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0 spike passed — GO; M1 done** (2026-10-11); M2 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 
@@ -145,7 +145,7 @@ The host's own views stay writable: protection only matters where the game runs.
 | # | Milestone | Exit criterion |
 |---|---|---|
 | **M0** | **Feasibility spike (1–2 days) — go/no-go** | (a) x86-64 and arm64 processes map one memory entry at identical VAs and exchange data correctly under TSO/weak ordering; (b) doorbell and message round-trip latency measured; (c) **the same synthetic Vulkan workload** (~1,600 draws/frame, push descriptors, ~200 render passes) built x86-64 (Rosetta) and arm64, CPU time per frame compared — this number decides whether the project is worth it |
-| M1 | Shared guest memory in the runtime | Game runs single-process on the memory-entry backing (no behaviour change) |
+| M1 ✅ | Shared guest memory in the runtime | Game runs single-process on the memory-entry backing (no behaviour change) — done: `pool_entry` in `runtime_memory.c`, zero-in-place `punch()` (resident pages only), `BB_SHARED_GUEST_MEMORY=0` fallback; same FPS and launch time |
 | M2 | arm64 deps, `bbgpu-host` builds, HLE classification | Host starts, opens the window, maps guest memory |
 | M3 | Command path | Title screen renders through the host |
 | M4 | Page tracking + events across processes | Gameplay renders correctly; no stale-data glitches |

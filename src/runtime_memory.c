@@ -76,6 +76,19 @@ static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
 static int pool_fd=-1;
 static unsigned char *backing_base; /* second view of the pool: host writes bypass guest/GPU page protection */
+#ifdef __APPLE__
+/* M1 of docs/DESIGN_NATIVE_GPU_PROCESS.md: the pool is a Mach named memory entry, which a
+ * native (arm64) GPU process can map at the same addresses. BB_SHARED_GUEST_MEMORY=0 keeps the
+ * earlier private anonymous pool (comparison, fallback). */
+static mach_port_t pool_entry=MACH_PORT_NULL;
+static int shared_pool(void) {
+    static int value=-1;
+    if (value<0) { const char *env=getenv("BB_SHARED_GUEST_MEMORY"); value=!(env && env[0]=='0'); }
+    return value;
+}
+/* The pool's memory entry (MACH_PORT_NULL before the first guest map or without sharing). */
+mach_port_t runtime_memory_pool_entry(void) { return pool_entry; }
+#endif
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
 
@@ -162,6 +175,23 @@ static int pool(void) {
      * mach_vm_remap aliases of it (shared, not copied) and a punch maps fresh zero pages
      * over its range: the old pages go with their last view (callers unmap views first).
      * Placed above 1 TiB, out of the way of the low ranges. */
+    if (shared_pool()) {
+        /* A named entry: guest views and the backing view map it (shared object), and so can a
+         * second process. Pages are created on first touch, as for anonymous memory. */
+        memory_object_size_t size=POOL_SIZE+FLEX_SPAN;
+        if (mach_make_memory_entry_64(mach_task_self(),&size,0,
+                                      MAP_MEM_NAMED_CREATE|VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE,
+                                      &pool_entry,MACH_PORT_NULL)!=KERN_SUCCESS || size<POOL_SIZE+FLEX_SPAN) {
+            fputs("Runtime: cannot create the shared guest memory entry\n",stderr);
+            return -1;
+        }
+        mach_vm_address_t at=UINT64_C(1)<<40;
+        if (mach_vm_map(mach_task_self(),&at,POOL_SIZE+FLEX_SPAN,0,VM_FLAGS_ANYWHERE,pool_entry,0,FALSE,
+                        VM_PROT_READ|VM_PROT_WRITE,VM_PROT_READ|VM_PROT_WRITE,VM_INHERIT_NONE)!=KERN_SUCCESS)
+            return -1;
+        backing_base=(unsigned char *)(uintptr_t)at; pool_fd=0;
+        return 0;
+    }
     void *view=mmap((void *)(UINT64_C(1)<<40),POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,
                     MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
     if (view==MAP_FAILED) return -1;
@@ -178,7 +208,20 @@ static int pool(void) {
 }
 static void punch(uint64_t phys, uint64_t size) {
 #ifdef __APPLE__
-    if (backing_base)
+    if (backing_base && shared_pool()) {
+        /* Fresh pages mapped over the range would leave other views (another process) on the
+         * old object, and MADV_ZERO is ENOTSUP under Rosetta: zero in place, only the pages that
+         * may hold data (resident, compressed or paged out), so untouched ones stay uncommitted. */
+        const size_t host_page=(size_t)getpagesize(), chunk=UINT64_C(64)<<20;
+        static char vec[(UINT64_C(64)<<20)/4096];
+        for (uint64_t off=0; off<size; off+=chunk) {
+            const size_t n=(size_t)(size-off<chunk ? size-off : chunk);
+            unsigned char *at=backing_base+phys+off;
+            if (mincore(at,n,vec)) { memset(at,0,n); continue; }
+            for (size_t page=0; page*host_page<n; ++page)
+                if (vec[page]) memset(at+page*host_page,0,host_page);
+        }
+    } else if (backing_base)
         mmap(backing_base+phys,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0);
 #else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
@@ -306,9 +349,12 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     void *mapped=(void *)address;
     if (kind!=KIND_RESERVED) {
         mach_vm_address_t at=address; vm_prot_t cur, max;
-        if (mach_vm_remap(mach_task_self(),&at,size,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,mach_task_self(),
-                          (mach_vm_address_t)(uintptr_t)(backing_base+phys),FALSE,&cur,&max,VM_INHERIT_SHARE)!=KERN_SUCCESS
-            || mprotect(mapped,size,host_prot(prot))) return NO_MEMORY;
+        const kern_return_t kr = shared_pool()
+            ? mach_vm_map(mach_task_self(),&at,size,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,pool_entry,phys,FALSE,
+                          VM_PROT_READ|VM_PROT_WRITE,VM_PROT_ALL,VM_INHERIT_SHARE)
+            : mach_vm_remap(mach_task_self(),&at,size,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,mach_task_self(),
+                            (mach_vm_address_t)(uintptr_t)(backing_base+phys),FALSE,&cur,&max,VM_INHERIT_SHARE);
+        if (kr!=KERN_SUCCESS || mprotect(mapped,size,host_prot(prot))) return NO_MEMORY;
     } else if (mmap(mapped,size,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED)
         return NO_MEMORY;
 #else

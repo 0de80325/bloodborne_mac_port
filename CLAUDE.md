@@ -112,8 +112,9 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 ## Next steps (in order)
 
 1. **Native arm64 GPU process** (docs/DESIGN_NATIVE_GPU_PROCESS.md): M0 spike passed (1.75× on
-   MoltenVK-style CPU work). Next: M1 — guest memory on a shared Mach memory entry, single process,
-   no behaviour change (note `punch()` must act on the entry; see design "M0 results").
+   MoltenVK-style CPU work). M1 done (guest pool = Mach named entry, `runtime_memory_pool_entry()`,
+   `BB_SHARED_GUEST_MEMORY=0` fallback). Next: M2 — arm64 deps (`deps/arm64`), `bbgpu-host`
+   executable that opens the window and maps the guest memory; classify the 327 HLE functions.
 2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
    as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
 3. Rendering: half-rendered character after reloading a save; ghosting in character creation;
@@ -121,6 +122,9 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 4. Launcher / `.app` bundle.
 
 ## Gotchas learned
+
+- First launch after a rebuild is slow (~20 s to the window) and stutters: shader/pipeline caches
+  rebuild. Time launches with warm caches.
 
 - zsh: `"$VAR:src/..."` triggers zsh's `:s` history modifier — write `"${VAR}:src/..."`.
 - Run Vulkan programs with `VK_DRIVER_FILES=$PWD/deps/x86_64/share/vulkan/icd.d/MoltenVK_icd.json`
