@@ -41,7 +41,11 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
         // Similarly to above, we specify storage usage. This is typically not supported by
         // compressed formats, but may be used for uncompressed views. In order to satisfy this,
         // we will also specify the extended usage bit.
+#ifndef __APPLE__
         usage |= vk::ImageUsageFlagBits::eStorage;
+#endif
+        // bbport: Metal cannot write compressed textures, not even through uncompressed views,
+        // and MoltenVK rejects the combination. Block images are filled by buffer copies.
     }
 
     return usage;

@@ -66,7 +66,8 @@ python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(g
 - [x] Runtime port: TLS via pthread TSD slot, low memory, signals, timed locks, thread dumps —
   compiles, unit tests pass under Rosetta (2026-10-11)
 - [x] Boot with `--cpu-only`: guest runs to graphics init (stops on unbound Gnm, as expected) (2026-10-11)
-- [ ] GPU boot: window + Vulkan instance OK; device creation needs `robustBufferAccess2`/`nullDescriptor` workarounds
+- [x] GPU boot on MoltenVK: character creation, save, first level loads and plays (2026-10-11)
+- [ ] Rendering gaps (ghosting halo), job-pool crash, performance
 - [ ] GPU on MoltenVK; fix rendering gaps
 - [ ] MetalFX upscaling, zero-copy guest memory
 - [ ] Launcher and `.app` bundle

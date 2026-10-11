@@ -1157,6 +1157,18 @@ static void fault(int sig, siginfo_t *info, void *context) {
              (unsigned long long)UC_REG(uc, rdi), (unsigned long long)UC_REG(uc, rsi),
              (unsigned long long)UC_REG(uc, rsp));
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (getenv("BB_FAULT_DUMP")) { /* TEMP diagnostic: object at rbx, twice, 100 ms apart */
+        const uint64_t *o = (const uint64_t *)(uintptr_t)UC_REG(uc, rbx);
+        for (int pass = 0; pass < 2; ++pass) {
+            for (int i = 0; i < 48; i += 4) {
+                snprintf(line, sizeof(line), "  [%d] +%#05x: %016llx %016llx %016llx %016llx\n", pass, i * 8,
+                         (unsigned long long)o[i], (unsigned long long)o[i + 1],
+                         (unsigned long long)o[i + 2], (unsigned long long)o[i + 3]);
+                ssize_t written_=write(2, line, strlen(line)); (void)written_;
+            }
+            usleep(100000);
+        }
+    }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];

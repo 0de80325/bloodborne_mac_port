@@ -80,8 +80,14 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
   .data 0x53b3260). Root cause not found yet — suspects: macOS memory aliasing bug in
   flexible memory (0x7109…), or an HLE call behaving differently. Fault handler now prints
   rax/rbx/rdi/rsi/rsp; `BB_TRACE=1` adds import logs and thread snapshots.
-- MoltenVK cannot create BC1/BC7 images with Storage usage (`image.cpp:185` errors) — next
-  rendering gap after the crash.
+- **Milestone (2026-10-11):** with BC images created without Storage usage on macOS (Metal can't
+  write compressed textures; this also removed ~520 MoltenVK "command buffer not begun" errors)
+  the user created a character, saved, and loaded into the first level — playable, a little
+  sluggish. Open issues: dark ghosting halo around the character (grows when zooming, never
+  shrinks: likely an uncleared/accumulating target — suspects: null image bindings without
+  stand-ins, non-zeroed OOB reads, compute clears); the job-pool fault above may be triggered by
+  in-game actions (user was playing during those runs) — get the timeline.
+- Probe has a TEMP env-gated diagnostic `BB_FAULT_DUMP=1` (dumps 0x180 bytes at rbx twice).
 - A stale shader cache from a crashed run fails `serdes.h:109`; delete it. Test runs without
   `<data>/user` existing put GPU caches in `~/Library/Application Support/shadPS4` (path_util
   reads `BB_GPU_USER_DIR` at static init, before bbgpu_init sets it) — `mkdir out/macdata/user`.
@@ -93,8 +99,8 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 
 ## Next steps (in order)
 
-1. Find the worker-thread job fault above (systematic debugging; compare memory aliasing).
-2. Null image bindings: 1x1 stand-in images (Option A, not done yet), BC + Storage on MoltenVK.
+1. Ghosting halo; null image bindings: 1x1 stand-in images (Option A, not done yet).
+2. Worker-thread job fault above (needs the user's timeline of what triggers it).
 3. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
 4. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
 
