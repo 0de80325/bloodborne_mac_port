@@ -16,6 +16,13 @@ fi
 # BB_DATA_DIR: writable directory for the generated files (out/), saves (user/) and bbport.ini;
 # by default this directory.
 data=${BB_DATA_DIR:-.}
+# macOS: the x86-64 build runs under Rosetta 2 on MoltenVK from deps/ (scripts/macos/bootstrap_deps.sh).
+macos=0
+if [[ $(uname -s) == Darwin ]]; then
+    macos=1
+    icd=$PWD/deps/x86_64/share/vulkan/icd.d/MoltenVK_icd.json
+    if [[ -z ${VK_DRIVER_FILES:-} && -f $icd ]]; then export VK_DRIVER_FILES=$icd; fi
+fi
 out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
@@ -108,7 +115,7 @@ fi
 if [[ -n ${BB_PREBUILT:-} ]]; then
     probe=${BB_PROBE:-bin/bb-probe}
 else
-    bash build.sh
+    if (( macos )); then bash build_macos.sh; else bash build.sh; fi
     probe=out/bb-probe
 fi
 probe_args=("$out/boot-linked.bin" --content-profile "$out/content.bin" --patches "$out/patches.bin" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")

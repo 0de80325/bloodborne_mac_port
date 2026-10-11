@@ -6,10 +6,29 @@ identity, versions and NID, not by dump-local suffix or NID alone.
 import collections
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import sys
 from prepare import parse_self, span, unpack
+
+FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
+# macOS: GS base is the pthread TSD array and cannot be moved, so the load becomes
+# gs:[slot*8], a pthread key that src/runtime_thread.c (TCB_KEY) reserves and fills
+# with each thread's guest TCB. Keep both values equal.
+MACOS_GS_SLOT = 384
+
+
+def gs_load(slot=None):
+    """Same-length replacement for FS_LOAD: gs:[0] (Linux) or gs:[slot*8] (macOS).
+
+    Default slot: $BBPORT_GS_SLOT, else MACOS_GS_SLOT on darwin, else 0 (Linux)."""
+    if slot is None:
+        env = os.environ.get('BBPORT_GS_SLOT')
+        slot = int(env, 0) if env else MACOS_GS_SLOT if sys.platform == 'darwin' else 0
+    if not 0 <= slot < 512:
+        raise ValueError('GS slot outside the pthread key range')
+    return b'\x65' + FS_LOAD[1:5] + struct.pack('<I', slot * 8)
 
 
 def encode_id(value):
@@ -72,7 +91,7 @@ def module(path):
                 sha256=hashlib.sha256(source).hexdigest(), missing=missing)
 
 
-def link(game, out):
+def link(game, out, gs_slot=None):
     main = module(game/'eboot.bin')
     libc = module(game/'sce_module/libc.prx')
     raw = (out/'boot.bin').read_bytes()
@@ -160,9 +179,9 @@ def link(game, out):
             bindings.append((index,base+s['value'],2 if s['type']==1 else 1))
     # The eboot reads its thread pointer with `mov rax, fs:[0]` (initial-exec
     # TLS). glibc owns FS on Linux, so rewrite the segment prefix to GS; the
-    # runtime points GS at each guest thread's TCB. Only executable eboot
-    # segments are scanned, and only this exact 9-byte instruction.
-    fs_load = bytes.fromhex('64488b042500000000')
+    # runtime points GS at each guest thread's TCB (macOS: see gs_load). Only
+    # executable eboot segments are scanned, and only this exact 9-byte instruction.
+    fs_load, replacement = FS_LOAD, gs_load(gs_slot)
     patched = 0
     if sys.platform != 'win32':
         for p in main['ph']:
@@ -171,7 +190,7 @@ def link(game, out):
             start, end = p['vaddr'], p['vaddr'] + p['filesz']
             at = image.find(fs_load, start, end)
             while at >= 0:
-                image[at] = 0x65
+                image[at:at + len(fs_load)] = replacement
                 patched += 1
                 at = image.find(fs_load, at + len(fs_load), end)
     main_tls = next((p for p in main['ph'] if p['type']==7), None)
@@ -197,6 +216,7 @@ def link(game, out):
         f.write(image)
     report = dict(base=hex(base),size=libsize,sha256=libc['sha256'],init=hex(metadata[2]),
                   bindings=len(bindings),tls_module_id=2,fs_loads_patched=patched,
+                  gs_displacement=struct.unpack_from('<I',replacement,5)[0],
                   main_tls=dict(zip(('vaddr','filesz','memsz','align'),main_tls_values)),tls_relocations=tls_count,
                   tls_template_bytes=tls['filesz'],tls_memory_bytes=tls['memsz'],
                   imports=names,relocation_counts=dict(collections.Counter(r[1] for r in libc['relocs'])),
@@ -210,5 +230,6 @@ if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('game',type=Path);p.add_argument('--out',type=Path,default=Path(__file__).resolve().parent.parent/'out')
+    p.add_argument('--gs-slot',type=lambda v:int(v,0),help='pthread key for the guest TCB (default: see gs_load)')
     a=p.parse_args()
-    link(a.game,a.out)
+    link(a.game,a.out,a.gs_slot)

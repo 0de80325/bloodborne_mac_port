@@ -97,10 +97,22 @@ static int native_destroy(NativeMutex *m) { return pthread_mutex_destroy(m); }
 static int native_lock(NativeMutex *m) { return pthread_mutex_lock(m); }
 static int native_trylock(NativeMutex *m) { return pthread_mutex_trylock(m); }
 static struct timespec realtime(uint64_t ns) { return (struct timespec){(time_t)(ns / 1000000000), (long)(ns % 1000000000)}; }
+#ifdef __APPLE__
+/* No pthread_mutex_timedlock: retry until the realtime deadline, backing off to 1 ms sleeps. */
+static int native_timedlock(NativeMutex *m, uint64_t deadline) {
+    for (unsigned attempt = 0;; ++attempt) {
+        int e = pthread_mutex_trylock(m);
+        if (e != EBUSY) return e;
+        if (host_realtime_ns() >= deadline) return ETIMEDOUT;
+        if (attempt < 16) host_yield(); else host_sleep_ns(attempt < 64 ? 50000 : 1000000);
+    }
+}
+#else
 static int native_timedlock(NativeMutex *m, uint64_t deadline) {
     struct timespec end = realtime(deadline);
     return pthread_mutex_timedlock(m, &end);
 }
+#endif
 static int native_unlock(NativeMutex *m) { return pthread_mutex_unlock(m); }
 static int native_cond_init(NativeCond *c) { return pthread_cond_init(c, NULL); }
 static int native_cond_destroy(NativeCond *c) { return pthread_cond_destroy(c); }

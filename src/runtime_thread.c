@@ -2,7 +2,10 @@
  * (variant II: static TLS below the TCB). The loader rewrites the eboot's
  * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
  * keeps FS. On Windows GS is the TEB: the loader points the instruction at a TEB
- * TLS slot that holds the guest TCB instead.
+ * TLS slot that holds the guest TCB instead. On macOS GS base is the pthread TSD
+ * array and cannot be moved: the loader emits `mov rax, gs:[TCB_KEY*8]` instead
+ * (link_*.py --gs-slot, default on darwin) and each thread stores its TCB in that
+ * pthread key, reserved at startup below.
  * Priorities/affinity are recorded, not enforced by a PS4 scheduler. */
 #define _GNU_SOURCE
 #include "runtime.h"
@@ -20,9 +23,11 @@
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
-#include <sys/syscall.h>
 #include <sys/mman.h>
+#ifndef __APPLE__
+#include <sys/syscall.h>
 #include <asm/prctl.h>
+#endif
 #define EXIT_SET(buf) setjmp(buf)
 #define EXIT_JUMP(buf) longjmp(buf,1)
 #endif
@@ -54,10 +59,34 @@ void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
 
+#ifdef __APPLE__
+/* Must equal MACOS_GS_SLOT in scripts/link_modules.py and scripts/link_libc.py. Keys are
+ * handed out lowest-free first from 256 (the first is 258 under Rosetta, also with SDL3,
+ * AppKit and MoltenVK loaded), so a constructor in the executable, which runs after every
+ * linked dylib's initializers, takes spare keys until it holds this one, then frees them. */
+#define TCB_KEY 384
+static int tcb_key_reserved;
+__attribute__((constructor)) static void reserve_tcb_key(void) {
+    pthread_key_t spare[TCB_KEY], key;
+    size_t n=0;
+    while (!pthread_key_create(&key,NULL)) {
+        if (key==TCB_KEY) { tcb_key_reserved=1; break; }
+        if (key>TCB_KEY || n==TCB_KEY) { pthread_key_delete(key); break; }
+        spare[n++]=key;
+    }
+    while (n) pthread_key_delete(spare[--n]);
+}
+#endif
+
 static void set_tls_base(void *base) {
 #ifdef _WIN32
     runtime_win_set_tcb(base);
     __asm__ __volatile__("wrfsbase %0" : : "r"(base));
+#elif defined(__APPLE__)
+    void *check=NULL;
+    if (tcb_key_reserved && !pthread_setspecific(TCB_KEY,base))
+        __asm__ __volatile__("movq %%gs:%c1, %0" : "=r"(check) : "i"(TCB_KEY*8));
+    if (check!=base) { fprintf(stderr,"STOP: pthread key %d unavailable for the guest TCB\n",TCB_KEY); exit(21); }
 #else
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
 #endif
@@ -260,7 +289,11 @@ static void set_host_name(const char *name) {
 #ifdef _WIN32
     runtime_win_set_thread_name(host);
 #else
+#ifdef __APPLE__
+    pthread_setname_np(host);
+#else
     pthread_setname_np(pthread_self(),host);
+#endif
 #endif
 }
 

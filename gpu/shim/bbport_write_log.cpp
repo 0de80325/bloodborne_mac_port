@@ -11,6 +11,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/ucontext.h>
+#include "bbport_threads.h"
 #else
 #include <ucontext.h>
 #include <unistd.h>
@@ -99,6 +102,10 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     const auto* ctx = static_cast<const CONTEXT*>(ucontext);
     const std::uint64_t regs[] = {ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx,
                                   ctx->Rsi, ctx->Rdi, ctx->R14, ctx->R15};
+#elif defined(__APPLE__)
+    const auto& ss = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
+    const std::uint64_t regs[] = {ss.__rax, ss.__rbx, ss.__rcx, ss.__rdx,
+                                  ss.__rsi, ss.__rdi, ss.__r14, ss.__r15};
 #else
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     const auto* g = uc->uc_mcontext.gregs;

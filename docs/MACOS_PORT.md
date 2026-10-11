@@ -21,12 +21,12 @@ Graphics use a staged hybrid plan:
 
 | Area | Linux/Windows today | macOS plan |
 |---|---|---|
-| Guest TLS (`fs:[0]`) | rewritten to `gs:[0]` + `arch_prctl` (Linux), TEB slot (Windows) | rewrite to `gs:[key*8]`: a reserved pthread TSD slot holding the guest TCB |
-| Low (<1 TiB) host memory | `MAP_FIXED_NOREPLACE`, brk heap via `mallopt` | `mmap` with hint + verify; route guest-visible host allocations through `runtime_low_alloc` |
-| Fault handling | `ucontext gregs[REG_RIP]` | `uc_mcontext->__ss.__rip` |
-| Thread dumps | `getdents64` + `tgkill` | `task_threads` / `pthread_kill` |
-| Restart | `close_range` | close loop / `posix_spawn` |
-| Futex waits | `futex` syscall | `os_sync_wait_on_address` / `__ulock_wait` |
+| Guest TLS (`fs:[0]`) | rewritten to `gs:[0]` + `arch_prctl` (Linux), TEB slot (Windows) | **done:** `gs:[0xc00]`, pthread key 384 reserved at startup holds the guest TCB |
+| Low (<1 TiB) host memory | `MAP_FIXED_NOREPLACE`, brk heap via `mallopt` | **done:** hint + verify; guest range from 0x7000000000 (above a kernel hole at 63–448 GiB), reserved up front; aliases via `mach_vm_remap` |
+| Fault handling | `ucontext gregs[REG_RIP]` | **done:** `uc_mcontext->__ss.__rip`; write faults arrive as SIGBUS |
+| Thread dumps | `getdents64` + `tgkill` | **done:** `task_threads` / `pthread_kill` |
+| Restart | `close_range` | **done:** close loop |
+| Timed locks / clocks | `pthread_mutex_timedlock`, `clock_nanosleep`, `RUSAGE_THREAD` | **done:** trylock backoff, monotonic sleep loop, Mach `thread_info` |
 | Upscaling | FSR 3.1 / FSR 4 | FSR 3.1, then MetalFX (FSR 4 not expected to work) |
 
 ## Toolchain
@@ -37,7 +37,9 @@ Graphics use a staged hybrid plan:
   fmt, xxHash, miniz, Zydis, FFmpeg 7.1 and header-only libs into `deps/x86_64` (no sudo, no x86
   Homebrew), and installs the universal MoltenVK dylib with an ICD manifest. Host tools (cmake,
   ninja, nasm, glslang, pkgconf, boost headers) come from the normal arm64 Homebrew.
-- Run with `VK_DRIVER_FILES=deps/x86_64/share/vulkan/icd.d/MoltenVK_icd.json`.
+- `bash build_macos.sh [--test|--gpu-only]`: builds `out/gpu/libbbgpu.dylib`, `out/bb-probe` and
+  `out/bb-gpu-capabilities` (x86-64), optionally running the unit tests.
+- Run with `VK_DRIVER_FILES=deps/x86_64/share/vulkan/icd.d/MoltenVK_icd.json` (`run.sh` sets it on macOS).
 
 Verified 2026-10-11 on an M4 Max (macOS 26.6): an x86-64 binary under Rosetta enumerates
 "Apple M4 Max", Vulkan 1.3, via MoltenVK 1.4.2. Relevant for the plan: `VK_EXT_metal_objects`
@@ -60,8 +62,9 @@ python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(g
 - [x] Repo, plan, README header (2026-10-11)
 - [x] `tools/pkg_extract` — game unpacked and verified as 1.09 (2026-10-11)
 - [x] x86-64 dependency bootstrap; MoltenVK verified under Rosetta (2026-10-11)
-- [ ] macOS build script for `gpu/` (bbgpu dylib) and the loader
-- [ ] Runtime port: TLS via pthread TSD slot, low memory, signals, futex, thread dumps
+- [x] macOS build script `build_macos.sh` for `gpu/` (bbgpu dylib) and the loader (2026-10-11)
+- [x] Runtime port: TLS via pthread TSD slot, low memory, signals, timed locks, thread dumps —
+  compiles, unit tests pass under Rosetta (2026-10-11)
 - [ ] Boot with `--cpu-only`
 - [ ] GPU on MoltenVK; fix rendering gaps
 - [ ] MetalFX upscaling, zero-copy guest memory

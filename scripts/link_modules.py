@@ -17,10 +17,9 @@ from pathlib import Path
 import struct
 import sys
 from prepare import parse_self, span, unpack
-from link_libc import encode_id
+from link_libc import FS_LOAD, encode_id, gs_load
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
-FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
 def module(path):
@@ -75,8 +74,8 @@ def module(path):
                 sha256=hashlib.sha256(source).hexdigest(), missing=missing)
 
 
-def patch_fs_loads(image, ph, base):
-    """Rewrite initial-exec `mov rax, fs:[0]` to GS: glibc owns FS on Linux."""
+def patch_fs_loads(image, ph, base, replacement):
+    """Rewrite initial-exec `mov rax, fs:[0]` to GS: glibc owns FS on Linux (macOS: gs_load)."""
     if sys.platform == 'win32':
         return 0
     patched = 0
@@ -86,13 +85,13 @@ def patch_fs_loads(image, ph, base):
         start, end = base + p['vaddr'], base + p['vaddr'] + p['filesz']
         at = image.find(FS_LOAD, start, end)
         while at >= 0:
-            image[at] = 0x65
+            image[at:at + len(FS_LOAD)] = replacement
             patched += 1
             at = image.find(FS_LOAD, at + len(FS_LOAD), end)
     return patched
 
 
-def link(game, out, module_names=DEFAULT_MODULES):
+def link(game, out, module_names=DEFAULT_MODULES, gs_slot=None):
     main = module(game / 'eboot.bin')
     raw = (out / 'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
@@ -128,7 +127,8 @@ def link(game, out, module_names=DEFAULT_MODULES):
     exports, by_nid = {}, collections.defaultdict(list)
     table = []
     base = (size + 65535) & ~65535
-    fs_patched = patch_fs_loads(image, main['ph'], 0)
+    replacement = gs_load(gs_slot)
+    fs_patched = patch_fs_loads(image, main['ph'], 0, replacement)
     tls_module = 2
     for filename in module_names:
         m = module(game / 'sce_module' / filename)
@@ -192,7 +192,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
                 exports[s['identity']] = entry_value
                 by_nid[(s['identity'][0], s['identity'][1][0])].append(entry_value)
                 count += 1
-        fs_patched += patch_fs_loads(image, m['ph'], base)
+        fs_patched += patch_fs_loads(image, m['ph'], base, replacement)
         table.append(dict(file=filename, base=base, size=modsize, init=base + m['tags'].get(12, 0),
                           tls_address=base + tls['vaddr'] if tls else 0, tls_memsz=tls['memsz'] if tls else 0,
                           tls_filesz=tls['filesz'] if tls else 0, tls_module=module_id,
@@ -238,6 +238,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
         f.write(image)
     report = dict(modules=[{k: (hex(v) if k in ('base', 'init', 'tls_address') else v) for k, v in t.items()} for t in table],
                   bindings=len(bindings), imports=len(names), fs_loads_patched=fs_patched,
+                  gs_displacement=unpack('<I', replacement, 5)[0],
                   main_tls=dict(zip(('vaddr', 'filesz', 'memsz', 'align'), main_tls_values)),
                   unresolved_imports=unresolved)
     (out / 'link.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -252,5 +253,6 @@ if __name__ == '__main__':
     p.add_argument('game', type=Path)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--modules', nargs='*', default=list(DEFAULT_MODULES))
+    p.add_argument('--gs-slot', type=lambda v: int(v, 0), help='pthread key for the guest TCB (default: see link_libc.gs_load)')
     a = p.parse_args()
-    link(a.game, a.out, a.modules)
+    link(a.game, a.out, a.modules, a.gs_slot)

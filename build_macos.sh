@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# macOS (Apple Silicon) build: everything is x86-64 and runs under Rosetta 2, because the game's
+# eboot.bin is x86-64 code executed directly. Dependencies come from deps/x86_64
+# (scripts/macos/bootstrap_deps.sh); nothing from the arm64 Homebrew may be linked.
+#
+#   bash build_macos.sh            # libbbgpu.dylib, bb-probe, bb-gpu-capabilities
+#   bash build_macos.sh --test     # also build and run the runtime tests
+#   bash build_macos.sh --gpu-only # only the GPU library
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+ROOT=$PWD
+PREFIX=$ROOT/deps/x86_64
+export MACOSX_DEPLOYMENT_TARGET=15.0
+if [[ ! -f $PREFIX/.built-MoltenVK ]]; then
+    echo 'x86-64 dependencies missing: run bash scripts/macos/bootstrap_deps.sh' >&2; exit 1
+fi
+for tool in cmake ninja glslang pkg-config; do
+    command -v $tool >/dev/null || { echo "Missing $tool (brew install cmake ninja glslang pkgconf)" >&2; exit 1; }
+done
+mkdir -p out
+CC=${CC:-/usr/bin/clang}
+ARCH=(-arch x86_64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET)
+export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig
+unset PKG_CONFIG_PATH
+read -r -a includes <<< "$(pkg-config --cflags vulkan sdl3)"
+read -r -a libraries <<< "$(pkg-config --libs vulkan sdl3)"
+
+# GPU library (shadPS4 video core + drivers): out/gpu/libbbgpu.dylib. PGO is GCC-specific
+# (.gcda profiles) and stays off on macOS; BB_LTO=OFF disables link-time optimization.
+if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
+    git submodule update --init --recursive
+fi
+for patch in gpu/patches/fsr-vulkan/*.patch; do
+    if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+        git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+    fi
+done
+# Boost is header-only: the arm64 Homebrew headers are fine (nothing is linked from there).
+boost=$(brew --prefix boost 2>/dev/null || echo /opt/homebrew/opt/boost)
+cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="${CXX:-/usr/bin/clang++}" \
+    -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET \
+    -DCMAKE_PREFIX_PATH="$PREFIX;$boost" -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew \
+    -DBoost_INCLUDE_DIR="$boost/include" \
+    -DBB_PGO=off -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" -Wno-dev >/dev/null
+echo "GPU library: LTO ${BB_LTO:-ON}"
+# A failed GPU build must stop here: an older libbbgpu.dylib would otherwise be used silently.
+if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
+    grep -v '^\[' out/gpu-build.log | tail -40 >&2
+    echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
+fi
+if [[ ${1:-} == --gpu-only ]]; then echo "Built $PWD/out/gpu/libbbgpu.dylib"; exit 0; fi
+
+# @executable_path/gpu: packaged copies keep the library next to the binary without patching it.
+gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,@executable_path/gpu -Wl,-rpath,"$PWD/out/gpu"
+    -Wl,-rpath,"$PREFIX/lib")
+runtime=(src/runtime*.c)
+# Third-party decoders: compiled once, without this project's -Werror policy.
+atrac9=(third_party/LibAtrac9/C/src/*.c)
+if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/libatrac9.a -name '*.c') ]]; then
+    rm -rf out/atrac9 && mkdir -p out/atrac9
+    for source in "${atrac9[@]}"; do "$CC" "${ARCH[@]}" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
+    ar rcs out/libatrac9.a out/atrac9/*.o
+fi
+cflags=(-std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${ARCH[@]}")
+"$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
+echo "Built $PWD/out/bb-probe"
+# GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror "${ARCH[@]}" "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" \
+    -Wl,-rpath,"$PREFIX/lib" -o out/bb-gpu-capabilities
+if [[ ${1:-} == --test ]]; then
+    "$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc tests/test_pad.c src/runtime_host.c "${libraries[@]}" -Wl,-rpath,"$PREFIX/lib" -o out/pad-test
+    out/pad-test
+    "$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc tests/test_runtime.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/runtime-test
+    out/runtime-test
+    "$CC" "${cflags[@]}" -Isrc tests/test_file_mods.c -o out/file-mods-test
+    out/file-mods-test
+    "$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
+    out/sema-test
+    "$CC" "${cflags[@]}" -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
+    out/content-test
+fi

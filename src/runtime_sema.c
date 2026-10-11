@@ -72,8 +72,8 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
            PS4 priority scheduler, host threads run at equal priority. */
         if (getenv("BB_TRACE_SEMA")) fprintf(stderr,"Runtime: blocking wait on semaphore %u (need %d, count %d)\n",id,need,s->count);
         Waiter w={.need=need};
-#ifdef _WIN32
-        host_cond_init(&w.event);
+#if defined(_WIN32) || defined(__APPLE__)
+        host_cond_init(&w.event); /* macOS: realtime clock only; waits below are relative */
 #else
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
@@ -93,6 +93,13 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
                 uint64_t now=now_ns();
                 e=now<deadline ? host_cond_timedwait(&w.event,&lock,deadline-now) : ETIMEDOUT;
             } else host_cond_wait(&w.event,&lock);
+#elif defined(__APPLE__)
+            int e=0;
+            if (timeout) {
+                uint64_t now=now_ns(),left=now<deadline ? deadline-now : 0;
+                struct timespec rel={.tv_sec=(time_t)(left/1000000000),.tv_nsec=(long)(left%1000000000)};
+                e=left ? pthread_cond_timedwait_relative_np(&w.event,&lock,&rel) : ETIMEDOUT;
+            } else e=pthread_cond_wait(&w.event,&lock);
 #else
             struct timespec end={.tv_sec=(time_t)(deadline/1000000000),.tv_nsec=(long)(deadline%1000000000)};
             int e=timeout ? pthread_cond_timedwait(&w.event,&lock,&end) : pthread_cond_wait(&w.event,&lock);

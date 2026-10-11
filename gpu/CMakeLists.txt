@@ -34,6 +34,9 @@ if (BB_PGO STREQUAL "generate")
     add_compile_options(-fprofile-generate=${BB_PGO_DIR} -fprofile-update=atomic)
     add_link_options(-fprofile-generate=${BB_PGO_DIR})
     add_compile_definitions(BB_PGO_GENERATE)
+elseif (BB_PGO STREQUAL "use" AND APPLE)
+    # bbport (macOS): Apple clang takes .profdata profiles, not GCC's .gcda files.
+    message(WARNING "BB_PGO=use is not supported on macOS yet; building without a profile")
 elseif (BB_PGO STREQUAL "use")
     # Partial training keeps unprofiled code optimized normally; counters from concurrent
     # threads can be slightly inconsistent (correction). Functions changed since the profile
@@ -102,7 +105,9 @@ if (WIN32)
     endif()
 else()
     pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+    if (NOT APPLE)
+        pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+    endif()
 endif()
 if (WIN32)
     if (NOT TARGET miniz::miniz)
@@ -214,7 +219,11 @@ if (WIN32)
     target_compile_definitions(bbgpu PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 endif()
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-if (NOT WIN32)
+if (APPLE)
+    # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe at load time.
+    target_link_options(bbgpu PRIVATE -Wl,-undefined,dynamic_lookup)
+    target_compile_definitions(bbgpu PRIVATE VK_USE_PLATFORM_METAL_EXT)
+elseif (NOT WIN32)
     # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
     target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
@@ -222,6 +231,10 @@ target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vu
 if (WIN32)
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
         tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit ws2_32)
+elseif (APPLE)
+    target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
+        tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit
+        "-framework Metal" "-framework QuartzCore")
 else()
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
         tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)

@@ -1,5 +1,5 @@
 /* The runtime's own locks, condition variables, threads and clocks.
- * Linux: pthreads and clock_gettime.
+ * Linux: pthreads and clock_gettime. macOS: the same pthreads path (see __APPLE__ below).
  * Windows: native SRWLOCK, CONDITION_VARIABLE, CRT threads, QueryPerformanceCounter. */
 #ifndef BB_HOST_SYNC_H
 #define BB_HOST_SYNC_H
@@ -72,6 +72,16 @@ typedef HANDLE HostThread;
 #else
 #include <pthread.h>
 #include <sched.h>
+#ifdef __APPLE__
+#include <sys/types.h>
+/* macOS has no gettid(): the Mach thread id, as in gpu/shim/bbport_threads.h, so thread ids
+ * reported by the runtime and by libbbgpu agree. */
+static inline pid_t gettid(void) {
+    uint64_t id = 0;
+    pthread_threadid_np(NULL, &id);
+    return (pid_t)id;
+}
+#endif
 
 typedef pthread_mutex_t HostMutex;
 #define HOST_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
@@ -83,7 +93,11 @@ static inline void host_mutex_lock(HostMutex *m) { host_lock(m); }
 static inline void host_mutex_unlock(HostMutex *m) { host_unlock(m); }
 
 typedef pthread_mutex_t HostRecursiveMutex;
+#ifdef __APPLE__
+#define HOST_RECURSIVE_MUTEX_INIT PTHREAD_RECURSIVE_MUTEX_INITIALIZER
+#else
 #define HOST_RECURSIVE_MUTEX_INIT PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+#endif
 static inline void host_recursive_lock(HostRecursiveMutex *m) { pthread_mutex_lock(m); }
 static inline void host_recursive_unlock(HostRecursiveMutex *m) { pthread_mutex_unlock(m); }
 

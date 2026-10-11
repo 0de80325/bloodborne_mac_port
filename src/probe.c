@@ -18,15 +18,34 @@
 #endif
 #else
 #include <sys/mman.h>
-#include <malloc.h>
 #include <unistd.h>
 #include <signal.h>
-#include <ucontext.h>
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <execinfo.h>
-#include <sys/syscall.h>
 #include <sys/uio.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#undef round_page /* <mach/vm_param.h> macros; probe.c has its own */
+#undef trunc_page
+#define UC_REG(uc, r) ((uc)->uc_mcontext->__ss.__##r)
+#else
+#include <malloc.h>
+#include <ucontext.h>
+#include <sys/syscall.h>
+#define UC_REG(uc, r) ((uc)->uc_mcontext.gregs[UC_##r])
+#define UC_rip REG_RIP
+#define UC_rbp REG_RBP
+#define UC_rdi REG_RDI
+#endif
+#endif
+/* Mach-O prefixes C symbols with '_': top-level asm must name them through SYM(). */
+#ifdef __APPLE__
+#define SYM(name) "_" #name
+#else
+#define SYM(name) #name
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -153,8 +172,10 @@ static void protect(void *p, size_t size, unsigned flags) {
     if (mprotect(p, size, mode)) fail("mprotect failed");
 #endif
 }
+#ifdef _WIN32
 static volatile uint64_t g_last_progress_tick = 0;
 static volatile int g_watchdog_running = 1;
+#endif
 
 void runtime_notify_progress(void) {
 #ifdef _WIN32
@@ -268,8 +289,8 @@ ABI void post_import_hook(uint32_t index, uint64_t ret_val) {
 void common_dispatch(void);
 __asm__(
 ".text\n"
-".globl common_dispatch\n"
-"common_dispatch:\n"
+".globl " SYM(common_dispatch) "\n"
+SYM(common_dispatch) ":\n"
 "   push %rbp\n"
 "   mov %rsp, %rbp\n"
 "   sub $208, %rsp\n"
@@ -293,7 +314,7 @@ __asm__(
 "   mov 0(%rsp), %rdi\n"
 "   lea 8(%rsp), %rsi\n"
 "   mov 8(%rbp), %rdx\n"
-"   call pre_import_hook\n"
+"   call " SYM(pre_import_hook) "\n"
 "   test %rax, %rax\n"
 "   jnz 1f\n"
 "   xor %rax, %rax\n"
@@ -344,8 +365,8 @@ __asm__(
 "   movdqu %xmm0, 80(%rsp)\n"
 "   mov 0(%rsp), %rdi\n"
 "   mov %rax, %rsi\n"
-"   call post_import_hook\n"
-"   call restore_guest_fs\n"
+"   call " SYM(post_import_hook) "\n"
+"   call " SYM(restore_guest_fs) "\n"
 "   mov 56(%rsp), %rax\n"
 "   mov 24(%rsp), %rdx\n"
 "   movdqu 80(%rsp), %xmm0\n"
@@ -354,6 +375,9 @@ __asm__(
 "   ret\n"
 );
 
+/* Thread/hang dumps that inspect other threads use Win32 APIs; POSIX hosts use the
+ * SIGALRM/SIGUSR2 dump further below. */
+#ifdef _WIN32
 static void print_code_loc(const char *prefix, uintptr_t addr) {
     if (addr >= (uintptr_t)image && addr < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
         uintptr_t off = addr - (uintptr_t)image;
@@ -498,8 +522,11 @@ static void dump_watchdog(void) {
     fflush(stdout);
 }
 
+#endif
+
 static char g_run_timestamp[32];
 
+#ifdef _WIN32
 static void dump_hang_snapshot(const char *path, uint64_t elapsed_s, uint64_t cur_flips, uint64_t cur_submits, uint64_t now) {
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -648,7 +675,6 @@ static void dump_hang_snapshot(const char *path, uint64_t elapsed_s, uint64_t cu
     fflush(stdout);
 }
 
-#ifdef _WIN32
 static DWORD WINAPI watchdog_worker(LPVOID param) {
     (void)param;
     uint64_t last_flips = 0;
@@ -1079,7 +1105,7 @@ static LONG WINAPI win_veh_handler(EXCEPTION_POINTERS *ep) {
 #else
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
+__asm__(".text\n.globl " SYM(enter_on_stack) "\n" SYM(enter_on_stack) ":\n"
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
@@ -1090,8 +1116,13 @@ static ABI void guest_exit(void) {
 }
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
-    /* GPU page tracking (write-protected guest pages) is resolved first. */
+    /* GPU page tracking (write-protected guest pages) is resolved first. macOS reports a
+     * write to a mapped read-only page as SIGBUS, not SIGSEGV. */
+#ifdef __APPLE__
+    if (gpu_enabled && (sig == SIGSEGV || sig == SIGBUS) && bbgpu_handle_fault(context, info->si_addr)) return;
+#else
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
+#endif
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -1104,7 +1135,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
     ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    uintptr_t rip = (uintptr_t)UC_REG(uc, rip);
     char line[512];
     Dl_info where;
     if (rip - (uintptr_t)image < 0x10000000)
@@ -1141,18 +1172,24 @@ static void write_hex(char *out, uint64_t v) {
 }
 static void dump_frames(ucontext_t *uc) {
     char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
-    uintptr_t rip=(uintptr_t)uc->uc_mcontext.gregs[REG_RIP], rbp=(uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+    uintptr_t rip=(uintptr_t)UC_REG(uc, rip), rbp=(uintptr_t)UC_REG(uc, rbp);
     uint64_t tid=(uint64_t)gettid();
     /* First argument register: the lock address when a thread waits on a futex. */
     char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
-    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)uc->uc_mcontext.gregs[REG_RDI]);
+    write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)UC_REG(uc, rdi));
     { ssize_t written_=write(2,arg,sizeof(arg)-1); (void)written_; }
     for (int depth=0; depth<24; ++depth) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
         { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
         uintptr_t frame[2];
+#ifdef __APPLE__
+        mach_vm_size_t got=0;
+        if (!rbp || mach_vm_read_overwrite(mach_task_self(),rbp,sizeof(frame),(mach_vm_address_t)(uintptr_t)frame,&got)!=KERN_SUCCESS ||
+            got!=sizeof(frame)) break;
+#else
         struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
         if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
+#endif
         if (frame[0]<=rbp) break;
         rbp=frame[0]; rip=frame[1];
     }
@@ -1163,6 +1200,18 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     const char head[]="STOP: watchdog timeout; thread stacks:\n";
     { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
     dump_frames(context);
+#ifdef __APPLE__
+    /* No /proc: signal every other pthread of the task (Mach threads without a pthread,
+     * e.g. kernel workqueue or Rosetta helpers, are skipped). */
+    thread_act_array_t list;
+    mach_msg_type_number_t count=0;
+    mach_port_t self=pthread_mach_thread_np(pthread_self());
+    if (task_threads(mach_task_self(),&list,&count)==KERN_SUCCESS)
+        for (mach_msg_type_number_t i=0;i<count;++i) {
+            pthread_t thread=list[i]!=self ? pthread_from_mach_thread_np(list[i]) : NULL;
+            if (thread) { pthread_kill(thread,SIGUSR2); usleep(20000); }
+        }
+#else
     int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
     char buffer[4096];
     long n;
@@ -1174,6 +1223,7 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
             if (tid>0 && tid!=self) { syscall(SYS_tgkill,getpid(),tid,SIGUSR2); usleep(20000); }
             at+=d->reclen;
         }
+#endif
     usleep(100000);
     _exit(128 + sig);
 }
@@ -1250,7 +1300,11 @@ void runtime_restart(void) {
     fflush(NULL);
 #ifndef _WIN32
     puts("Runtime: restarting through run.sh");
+#ifdef __APPLE__
+    for (int fd=3, end=getdtablesize(); fd<end; ++fd) close(fd);
+#else
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#endif
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);
@@ -1274,6 +1328,9 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifdef _WIN32
     runtime_memory_reserve_space();
+#elif defined(__APPLE__)
+    /* Before SDL/MoltenVK map anything: on macOS large host mmaps land in the guest range. */
+    if (runtime_memory_reserve_space()) fail("cannot reserve guest address range");
 #endif
     time_t t_now = time(NULL);
     struct tm tm_buf;
@@ -1317,9 +1374,10 @@ int main(int argc, char **argv) {
         printf("[FAST PATH] Tracing disabled (BB_TRACE=0): direct import dispatch active.\n");
     }
     atexit(print_exit_summary);
-#ifndef _WIN32
+#ifdef __linux__
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
-       non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
+       non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits.
+       macOS malloc lives far above 1 TiB: such objects come from runtime_low_alloc. */
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif

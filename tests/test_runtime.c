@@ -4,6 +4,8 @@
 
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
+/* probe.c: reloads the guest FS base after host calls (Windows only; a no-op elsewhere). */
+ABI void restore_guest_fs(void) {}
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +13,29 @@ void runtime_restart(void) { abort(); }
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+
+#ifdef __APPLE__
+/* macOS has no pthread barriers: a minimal one (generation counter) for these tests. */
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned count, waiting, generation; } pthread_barrier_t;
+static int pthread_barrier_init(pthread_barrier_t *b, const void *attr, unsigned count) {
+    (void)attr; b->count=count; b->waiting=0; b->generation=0;
+    pthread_mutex_init(&b->m,NULL); return pthread_cond_init(&b->c,NULL);
+}
+static int pthread_barrier_destroy(pthread_barrier_t *b) {
+    pthread_mutex_destroy(&b->m); return pthread_cond_destroy(&b->c);
+}
+static int pthread_barrier_wait(pthread_barrier_t *b) {
+    pthread_mutex_lock(&b->m);
+    unsigned generation=b->generation;
+    if (++b->waiting==b->count) {
+        b->waiting=0; b->generation++; pthread_cond_broadcast(&b->c);
+        pthread_mutex_unlock(&b->m); return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    while (generation==b->generation) pthread_cond_wait(&b->c,&b->m);
+    pthread_mutex_unlock(&b->m); return 0;
+}
+#endif
 
 typedef int (ABI *Register)(GuestCallback);
 typedef int (ABI *RegisterCxa)(void (ABI *)(void *), void *, void *);

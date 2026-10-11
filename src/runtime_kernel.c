@@ -20,6 +20,10 @@
 #include <sys/random.h>
 #include <sys/resource.h>
 #endif
+#ifdef __APPLE__
+#include <mach/mach.h>
+#define CLOCK_REALTIME_COARSE CLOCK_REALTIME
+#endif
 
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define PAGE 16384
@@ -192,8 +196,21 @@ static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     out->utime=(GuestTimeval){user/1000000,user%1000000};
     out->stime=(GuestTimeval){system/1000000,system%1000000};
 #else
+#ifdef __APPLE__
+    if (who==1) { /* no RUSAGE_THREAD: ask Mach for this thread's times */
+        thread_basic_info_data_t info; mach_msg_type_number_t count=THREAD_BASIC_INFO_COUNT;
+        if (thread_info(pthread_mach_thread_np(pthread_self()),THREAD_BASIC_INFO,(thread_info_t)&info,&count)==KERN_SUCCESS) {
+            out->utime=(GuestTimeval){info.user_time.seconds,info.user_time.microseconds};
+            out->stime=(GuestTimeval){info.system_time.seconds,info.system_time.microseconds};
+        }
+        return 0;
+    }
+    struct rusage r;
+    getrusage(RUSAGE_SELF,&r);
+#else
     struct rusage r;
     getrusage(who==0 ? RUSAGE_SELF : RUSAGE_THREAD,&r);
+#endif
     out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
     out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
 #endif
@@ -223,6 +240,8 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
         if (!old || !oldlen) return fail_posix(EINVAL);
 #ifdef _WIN32
         if (runtime_random(old,(size_t)*oldlen)<0) return fail_posix(errno);
+#elif defined(__APPLE__)
+        arc4random_buf(old,(size_t)*oldlen);
 #else
         if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);
 #endif

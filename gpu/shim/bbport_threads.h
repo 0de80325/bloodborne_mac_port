@@ -20,6 +20,10 @@ extern "C" __thread BbRecoverBuf* runtime_fault_recover;
 extern "C" int runtime_setjmp(BbRecoverBuf* buf) __attribute__((returns_twice));
 #define BB_RECOVER_SET(buf) runtime_setjmp(&(buf))
 #else
+#ifdef __APPLE__
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
 #include <sched.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -27,6 +31,15 @@ extern "C" int runtime_setjmp(BbRecoverBuf* buf) __attribute__((returns_twice));
 typedef sigjmp_buf BbRecoverBuf;
 extern "C" __thread BbRecoverBuf* runtime_fault_recover;
 #define BB_RECOVER_SET(buf) sigsetjmp(buf, 0)
+#endif
+
+#ifdef __APPLE__
+/// macOS has no gettid(): the Mach thread id (unique per thread, small enough for u32 in practice).
+static inline pid_t gettid() {
+    uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return static_cast<pid_t>(id);
+}
 #endif
 
 namespace BbThreads {
@@ -45,6 +58,9 @@ inline unsigned Available() {
         return std::max(1u, count);
     }
     return std::max(1u, std::thread::hardware_concurrency());
+#elif defined(__APPLE__)
+    // No affinity masks on macOS.
+    return std::max(1u, std::thread::hardware_concurrency());
 #else
     cpu_set_t set;
     CPU_ZERO(&set);
@@ -59,6 +75,9 @@ inline unsigned Available() {
 inline void MakeBackground() {
 #ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+#elif defined(__APPLE__)
+    // Background QoS: efficiency cores, lowest priority (the closest match to SCHED_IDLE).
+    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
 #else
     sched_param param{};
     if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) {

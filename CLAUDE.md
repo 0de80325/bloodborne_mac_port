@@ -47,27 +47,27 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
   Already run successfully; re-running is a no-op (stamps in `deps/x86_64/.built-*`).
 - Verified: x86-64 test binary under Rosetta sees "Apple M4 Max, Vulkan 1.3" via MoltenVK.
   MoltenVK lacks `geometryShader` and `logicOp`.
+- **`build_macos.sh`** builds everything x86-64 (`--gpu-only`, `--test`): `out/gpu/libbbgpu.dylib`
+  (`gpu/CMakeLists.txt` APPLE branch: no X11, `-undefined dynamic_lookup`, Metal surface via
+  `SDL_Metal_CreateView`), `out/bb-probe`, `out/bb-gpu-capabilities`. All 5 test suites pass
+  under Rosetta; bb-gpu-capabilities finds the M4 Max. PGO is off on macOS (GCC .gcda profiles).
+- **Runtime port compiled and unit-tested** (not yet booted with the game):
+  - Guest TLS: loader rewrites `fs:[0]` → `gs:[0xc00]` (`--gs-slot`/`BBPORT_GS_SLOT`, default
+    384 on darwin); `runtime_thread.c` constructor reserves pthread key **384** (first free key is
+    258 under Rosetta) and `set_tls_base` stores the TCB there and verifies the read-back.
+  - Memory (`runtime_memory.c`): **[0xfc0000000, 0x7000000000) is a permanent kernel hole** on
+    macOS, so guest `USER_MIN` = 0x7000000000 there; whole guest range reserved PROT_NONE up front
+    (probe.c `main`), backing = one anonymous region aliased with `mach_vm_remap`, hole-punch =
+    fixed anonymous remap. Low maps in [0x800000000, 0xfc0000000). Page size under Rosetta = 4K.
+  - Write faults arrive as SIGBUS on macOS (handled). Thread dumps via `task_threads`.
+  - No missing `runtime_low_alloc` routing found: guest-visible objects already use it.
 
 ## Next steps (in order)
 
-1. **macOS build script** (`build_macos.sh` or extend `build.sh`): configure `gpu/CMakeLists.txt`
-   for APPLE (it currently assumes WIN32 or Linux+X11: drop X11, use `-undefined dynamic_lookup`
-   instead of `--allow-shlib-undefined`, `VK_USE_PLATFORM_METAL_EXT`, no `-no-pie`/`-rdynamic`
-   GNU-isms as needed), `PKG_CONFIG_LIBDIR=deps/x86_64/lib/pkgconfig`, `-arch x86_64`.
-2. **Port the runtime (`src/`)** — see the porting table in `docs/MACOS_PORT.md`:
-   - Guest TLS: loader rewrites `mov rax, fs:[0]` → `gs:[0]` (`scripts/link_modules.py:79`,
-     `scripts/link_libc.py:161`). On macOS GS = pthread TSD array, so reserve a pthread key and
-     rewrite to `gs:[key*8]`, store guest TCB in that slot (`src/runtime_thread.c` `set_tls_base`).
-     Windows does the same trick with a TEB slot — mirror it.
-   - Guest-visible host memory must be < 1 TiB (40-bit packed pointers): `runtime_low_map`
-     (`src/runtime_memory.c:593`) uses `MAP_FIXED_NOREPLACE`; Linux also relies on `mallopt`
-     brk heap — macOS malloc is far above 1 TiB, so route through `runtime_low_alloc`.
-   - Linux-only: `arch_prctl`, `getdents64`/`tgkill` thread dumps, `close_range`, `mallopt`,
-     `<malloc.h>`, `<asm/prctl.h>`, futex in `src/host_sync.h`, `ucontext gregs[REG_RIP]`
-     (→ `uc_mcontext->__ss.__rip`) in `src/probe.c`.
-3. Boot with `--cpu-only` (no GPU) until the game reaches its main loop.
-4. Enable GPU via MoltenVK; fix rendering gaps (geometry shaders, D24S8 → D32S8, etc.).
-5. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
+1. Boot with `--cpu-only` (no GPU) until the game reaches its main loop (`run.sh` picks
+   `build_macos.sh` and MoltenVK on Darwin).
+2. Enable GPU via MoltenVK; fix rendering gaps (geometry shaders, D24S8 → D32S8, etc.).
+3. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
 
 ## Gotchas learned
 
@@ -77,3 +77,9 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 - Builds must not pick up arm64 libs from `/opt/homebrew` (bootstrap sets
   `CMAKE_IGNORE_PREFIX_PATH` and an isolated `PKG_CONFIG_LIBDIR`; do the same for bbport).
 - Existing docs in `docs/` (ROADMAP, history) are the upstream project's, partly in Russian.
+- **Rosetta + aliased memory:** code written through one alias and executed from another keeps
+  the stale translation until a protection change (RW→RX) on the executing alias.
+- macOS timed mutex/rwlock waits are trylock+backoff (up to ~1 ms late); `CLOCK_MONOTONIC`
+  keeps counting during system sleep.
+- Several Windows-fork regressions also broke Linux builds (`runtime_file.c` `DWORD` log,
+  `runtime_pad.c` missing `struct stat`, tests needing `restore_guest_fs`); fixed here.

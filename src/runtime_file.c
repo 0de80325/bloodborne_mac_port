@@ -247,6 +247,11 @@ static void convert_stat(const struct _stat64 *s,GuestStat *g) {
     g->birthtime=g->ctime;
 }
 #else
+#ifdef __APPLE__
+#define st_atim st_atimespec
+#define st_mtim st_mtimespec
+#define st_ctim st_ctimespec
+#endif
 static void convert_stat(const struct stat *s,GuestStat *g) {
     memset(g,0,sizeof(*g));
     g->dev=(uint32_t)s->st_dev; g->ino=(uint32_t)s->st_ino;
@@ -300,9 +305,13 @@ static int64_t do_open(const char *guest,int flags,int mode) {
             e=errno;
             if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
             else {
+#ifdef _WIN32
                 DWORD win_err = GetLastError();
                 fprintf(stderr, "Runtime ERROR: open('%s' -> '%s', flags=0x%x) failed: errno=%d, Win32 error %lu\n",
                         guest, path, flags, e, (unsigned long)win_err);
+#else
+                fprintf(stderr, "Runtime ERROR: open('%s' -> '%s', flags=0x%x) failed: errno=%d\n",guest,path,flags,e);
+#endif
             }
             return -e;
         }

@@ -18,6 +18,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -34,7 +38,13 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+#ifdef __APPLE__
+/* Apple Silicon keeps [0xfc0000000, 0x7000000000) as a permanent no-access hole in every
+ * process (Rosetta too): mmap there fails with EACCES, so the guest range starts above it. */
+#define USER_MIN UINT64_C(0x7000000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
@@ -92,7 +102,11 @@ static void log_mem_op(int kind, uintptr_t addr, uint64_t size, int prot) {
     e->addr = addr;
     e->size = size;
     e->prot = prot;
+#ifdef __APPLE__
+    e->tid = (uint32_t)gettid(); /* pthread_t is a pointer here */
+#else
     e->tid = (uint32_t)host_thread_id();
+#endif
 }
 void runtime_memory_dump_recent_ops(void *file_handle) {
     FILE *f = (FILE *)file_handle;
@@ -129,6 +143,23 @@ static int host_prot(int prot) {
 #endif
 static int space(void) { return win_mem_space(LOW_MIN,USER_MAX); }
 int runtime_memory_reserve_space(void) { return space(); }
+#elif defined(__APPLE__)
+/* The guest range is reserved (no access) once, as on Windows: place() maps over it with
+ * MAP_FIXED semantics, which on macOS silently replace whatever host library got there
+ * first (x86-64 mmap(NULL) under Rosetta hands out low addresses). Unmaps restore it. */
+static int space(void) {
+    static int state; /* 1 held, -1 failed */
+    if (!state) {
+        void *p=mmap((void *)USER_MIN,USER_MAX-USER_MIN,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
+        state = p==(void *)USER_MIN ? 1 : -1;
+        if (state<0) {
+            if (p!=MAP_FAILED) munmap(p,USER_MAX-USER_MIN);
+            fprintf(stderr,"Runtime: guest range 0x%" PRIx64 "-0x%" PRIx64 " is taken\n",USER_MIN,USER_MAX);
+        }
+    }
+    return state<0 ? -1 : 0;
+}
+int runtime_memory_reserve_space(void) { return space(); }
 #else
 int runtime_memory_reserve_space(void) { return 0; }
 #endif
@@ -140,6 +171,18 @@ static int pool(void) {
     backing_base = (unsigned char *)view; pool_fd = 0;
     const char *selftest = getenv("BB_SELFTEST_MEM");
     if (selftest && selftest[0] == '1') win_mem_run_selftest();
+    return 0;
+#elif defined(__APPLE__)
+    /* No memfd/fallocate, and a shm object cannot drop pages: F_PUNCHHOLE is for files
+     * (which would write back), MADV_FREE_REUSABLE keeps shm data, MADV_ZERO is ENOTSUP
+     * (always, under Rosetta). So the pool is one anonymous region; guest views are
+     * mach_vm_remap aliases of it (shared, not copied) and a punch maps fresh zero pages
+     * over its range: the old pages go with their last view (callers unmap views first).
+     * Placed above 1 TiB, out of the way of the low ranges. */
+    void *view=mmap((void *)(UINT64_C(1)<<40),POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,
+                    MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
+    if (view==MAP_FAILED) return -1;
+    backing_base=view; pool_fd=0;
     return 0;
 #else
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
@@ -153,6 +196,9 @@ static int pool(void) {
 static void punch(uint64_t phys, uint64_t size) {
 #ifdef _WIN32
     win_mem_punch(phys, size);
+#elif defined(__APPLE__)
+    if (backing_base)
+        mmap(backing_base+phys,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0);
 #else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
 #endif
@@ -193,6 +239,8 @@ static void flex_free(uint64_t phys, uint64_t size) {
     flex_set((phys-POOL_SIZE)/PAGE,size/PAGE,0);
 #ifdef _WIN32
     if (backing_base) memset(backing_base+phys,0,size);
+#elif defined(__APPLE__)
+    punch(phys,size);
 #else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
 #endif
@@ -292,6 +340,16 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (kind!=KIND_RESERVED ? win_mem_map(address,address+size,phys,host_prot(prot),restore_remnant)
                             : win_mem_release(address,address+size,restore_remnant)) return NO_MEMORY;
     void *mapped=(void *)address;
+#elif defined(__APPLE__)
+    if (space()) return NO_MEMORY;
+    void *mapped=(void *)address;
+    if (kind!=KIND_RESERVED) {
+        mach_vm_address_t at=address; vm_prot_t cur, max;
+        if (mach_vm_remap(mach_task_self(),&at,size,0,VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,mach_task_self(),
+                          (mach_vm_address_t)(uintptr_t)(backing_base+phys),FALSE,&cur,&max,VM_INHERIT_SHARE)!=KERN_SUCCESS
+            || mprotect(mapped,size,host_prot(prot))) return NO_MEMORY;
+    } else if (mmap(mapped,size,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED)
+        return NO_MEMORY;
 #else
     void *mapped = kind!=KIND_RESERVED
         ? mmap((void *)address,size,host_prot(prot),MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
@@ -384,6 +442,11 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
 #ifdef _WIN32
     if (vma_index(start)<vma_count && vmas[vma_index(start)].start<end && win_mem_release(start,end,restore_remnant))
         return INVALID;
+#elif defined(__APPLE__)
+    for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i) { /* back to reserved */
+        uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
+        if (mmap((void *)a,b-a,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED) return INVALID;
+    }
 #else
     for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i) {
         uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
@@ -605,6 +668,21 @@ void *runtime_low_map(size_t size, int prot) {
     write_unlock();
     CHECK_LOW_ADDR(p);
     return p;
+#elif defined(__APPLE__)
+    /* No MAP_FIXED_NOREPLACE: a hint is taken only when free, else the kernel returns the
+     * next free range above it, where the search resumes. Stops below the hole at
+     * 0xfc0000000 (see USER_MIN). */
+    void *p=MAP_FAILED;
+    while (low_next+size<=UINT64_C(0x0fc0000000)) {
+        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANON,-1,0);
+        if (p==(void *)low_next) { low_next+=size+PAGE; break; } /* unmapped gap catches overruns */
+        if (p!=MAP_FAILED) munmap(p,size);
+        low_next = p!=MAP_FAILED && (uintptr_t)p>low_next ? align_up((uintptr_t)p,PAGE) : low_next+size+PAGE;
+        p=MAP_FAILED;
+    }
+    write_unlock();
+    CHECK_LOW_ADDR(p);
+    return p==MAP_FAILED ? NULL : p;
 #else
     void *p=MAP_FAILED;
     while (low_next+size<=USER_MIN) {

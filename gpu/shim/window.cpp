@@ -1,4 +1,4 @@
-// bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// bbport: SDL3 window for the Vulkan swapchain (X11, Wayland or Metal on macOS).
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -34,6 +34,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 #if defined(_WIN32)
     window_info.type = WindowSystemType::Windows;
     window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+#elif defined(__APPLE__)
+    // MoltenVK presents to a CAMetalLayer (VK_EXT_metal_surface), as in shadPS4.
+    (void)wp;
+    window_info.type = WindowSystemType::Metal;
+    metal_view = SDL_Metal_CreateView(window);
+    ASSERT_MSG(metal_view, "Failed to create Metal view: {}", SDL_GetError());
+    window_info.render_surface = SDL_Metal_GetLayer(metal_view);
 #else
     if (driver && !std::strcmp(driver, "x11")) {
         window_info.type = WindowSystemType::X11;
@@ -55,6 +62,9 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 }
 
 WindowSDL::~WindowSDL() {
+#if defined(__APPLE__)
+    if (metal_view) SDL_Metal_DestroyView(metal_view);
+#endif
     SDL_DestroyWindow(window);
 }
 

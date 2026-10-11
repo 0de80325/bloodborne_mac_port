@@ -398,6 +398,9 @@ void VideoOutDriver::Flip(const Request& req) {
             gpu_ns = u64(ts.tv_sec) * 1000000000ull + u64(ts.tv_nsec);
         }
 #endif
+#ifdef __APPLE__
+        gpu_ns = (sys_us + user_us) * 1000;
+#endif
         const u64 images = BbStats::images_registered.load();
         const u64 image_bytes = BbStats::image_upload_bytes.load();
         const u64 buffer_bytes = BbStats::buffer_upload_bytes.load();

@@ -87,6 +87,9 @@ cmake_dep SDL . -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=
 cmake_dep fmt . -DFMT_TEST=OFF -DFMT_DOC=OFF
 cmake_dep xxHash cmake_unofficial -DBUILD_SHARED_LIBS=OFF -DXXHASH_BUILD_XXHSUM=OFF
 cmake_dep miniz . -DBUILD_SHARED_LIBS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_FUZZERS=OFF
+# Zydis builds against its bundled Zycore, but its installed CMake config also needs an
+# installed Zycore (find_dependency): install the same copy separately.
+cmake_dep zycore ../zydis/dependencies/zycore -DZYCORE_BUILD_SHARED_LIB=OFF
 cmake_dep zydis . -DZYDIS_BUILD_TOOLS=OFF -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_DOXYGEN=OFF
 cmake_dep magic_enum . -DMAGIC_ENUM_OPT_BUILD_EXAMPLES=OFF -DMAGIC_ENUM_OPT_BUILD_TESTS=OFF
 cmake_dep robin-map .
