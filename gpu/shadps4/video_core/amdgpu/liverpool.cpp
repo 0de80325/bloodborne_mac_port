@@ -132,6 +132,27 @@ static void DumpBadPacket(const u32* packet, uintptr_t base, size_t remaining) {
         std::fprintf(stderr, have ? "\n" : "(none)\n");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+    // Re-walk the buffer from its start with today's contents: if this parse lands on the bad
+    // packet's offset cleanly, the first parse read different data (a packet still being
+    // written), else the parser and the data disagree.
+    const auto* stream = reinterpret_cast<const u32*>(base);
+    const size_t target = (at - base) / 4;
+    size_t i = 0, prev[3] = {~size_t{0}, ~size_t{0}, ~size_t{0}};
+    while (i < target) {
+        const u32 h = stream[i];
+        const u32 type = h >> 30;
+        const size_t len = type == 2 ? 1 : ((h >> 16) & 0x3fff) + 2;
+        prev[0] = prev[1]; prev[1] = prev[2]; prev[2] = i;
+        i += len;
+    }
+    std::fprintf(stderr, "  re-walk %s at word %zu (bad packet at word %zu)\n",
+                 i == target ? "lands exactly" : "overshoots", i, target);
+    for (const size_t p : prev) {
+        if (p == ~size_t{0}) continue;
+        const u32 h = stream[p];
+        std::fprintf(stderr, "  packet at word %zu: header %08x (type %u, %u words)\n", p, h, h >> 30,
+                     (h >> 30) == 2 ? 1u : ((h >> 16) & 0x3fff) + 2);
+    }
 }
 
 void Liverpool::Process(std::stop_token stoken) {

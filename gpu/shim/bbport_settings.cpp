@@ -176,6 +176,8 @@ void Save() {
         std::printf("Settings: cannot write %s\n", Path());
         return;
     }
+    std::printf("Settings: saved %s (upscaler=%s preset=%d jitter=%d)\n", Path(),
+                UpscalerName(v.upscaler), v.preset.load(), int(v.jitter.load()));
     std::fprintf(file,
                  "# bbport settings (in-game menu: " BBPORT_MENU_KEYS " / L3+R3)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"

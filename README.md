@@ -21,6 +21,7 @@ first level is playable. Expect rendering gaps, missing features and crashes.
 
 - Plan, design decisions and porting checklist: [docs/MACOS_PORT.md](docs/MACOS_PORT.md)
 - Known issues and planned refinements: [docs/MACOS_BACKLOG.md](docs/MACOS_BACKLOG.md)
+- Tests run so far and their results: [docs/FINDINGS.md](docs/FINDINGS.md)
 
 ## How it works
 

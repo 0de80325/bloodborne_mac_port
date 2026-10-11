@@ -1,6 +1,7 @@
 # CLAUDE.md — Bloodborne macOS port (session handoff)
 
 Read this first, then `docs/MACOS_PORT.md` (plan, porting table, progress checklist).
+Test history and results: `docs/FINDINGS.md` (keep it updated with new measurements).
 Deferred work lives in `docs/MACOS_BACKLOG.md`: when taking a shortcut to get the game running,
 log the proper fix there under **1) Stability, 2) Performance, 3) Mac GUI** (priority order).
 
