@@ -33,3 +33,4 @@ test_th.*
 .idea/
 .DS_Store
 /game/
+/deps/
