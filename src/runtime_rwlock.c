@@ -1,6 +1,5 @@
-/* Host rwlocks (pthread rwlocks on Linux, SRW locks on Windows) behind the PS4
-   pointer-to-handle ABI. The registry protects lifetime, static initialization and
-   ownership; waiting happens outside it. */
+/* Host pthread rwlocks behind the PS4 pointer-to-handle ABI. The registry protects
+   lifetime, static initialization and ownership; waiting happens outside it. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
@@ -11,33 +10,6 @@
 
 typedef struct { int64_t seconds, nanoseconds; } GuestTime;
 
-#ifdef _WIN32
-typedef SRWLOCK NativeRwlock;
-static int native_init(NativeRwlock *l) { InitializeSRWLock(l); return 0; }
-static int native_destroy(NativeRwlock *l) { (void)l; return 0; }
-static int native_try(NativeRwlock *l, int writer) {
-    return (writer ? TryAcquireSRWLockExclusive(l) : TryAcquireSRWLockShared(l)) ? 0 : EBUSY;
-}
-static int native_lock(NativeRwlock *l, int writer) {
-    if (writer) AcquireSRWLockExclusive(l); else AcquireSRWLockShared(l);
-    return 0;
-}
-/* SRW locks have no timed acquire: retry until the realtime deadline. */
-static int native_timedlock(NativeRwlock *l, int writer, const GuestTime *time) {
-    uint64_t deadline = (uint64_t)time->seconds * 1000000000ull + (uint64_t)time->nanoseconds;
-    for (unsigned attempt = 0; ; ++attempt) {
-        if (!native_try(l, writer)) return 0;
-        if (host_realtime_ns() >= deadline) return ETIMEDOUT;
-        if (attempt < 64) YieldProcessor();
-        else if (attempt < 128) SwitchToThread();
-        else Sleep(1);
-    }
-}
-static int native_unlock(NativeRwlock *l, int writer) {
-    if (writer) ReleaseSRWLockExclusive(l); else ReleaseSRWLockShared(l);
-    return 0;
-}
-#else
 typedef pthread_rwlock_t NativeRwlock;
 static int native_init(NativeRwlock *l) { return pthread_rwlock_init(l, NULL); }
 static int native_destroy(NativeRwlock *l) { return pthread_rwlock_destroy(l); }
@@ -61,7 +33,6 @@ static int native_timedlock(NativeRwlock *l, int writer, const GuestTime *time) 
 }
 #endif
 static int native_unlock(NativeRwlock *l, int writer) { (void)writer; return pthread_rwlock_unlock(l); }
-#endif
 
 typedef struct Holder {
     HostThreadId thread;
@@ -171,7 +142,6 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
     }
     prune_locked(r,h);
     host_unlock(&registry_lock);
-    restore_guest_fs();
     return error(e);
 }
 
@@ -194,7 +164,6 @@ static ABI int32_t rw_unlock(Rwlock **handle) {
     if (!e) { if (h->writer) h->writer=0; else --h->readers; ++unlocks; }
     prune_locked(r,h);
     host_unlock(&registry_lock);
-    restore_guest_fs();
     return error(e);
 }
 
@@ -228,17 +197,10 @@ void runtime_rwlock_dump_info(void *f_ptr, void *handle) {
     for (Holder *h = r->holders; h; h = h->next) {
         const char *th_name = "unknown";
         for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-#ifdef _WIN32
-            if (t->win32_tid == (DWORD)h->thread) {
-                th_name = t->name;
-                break;
-            }
-#else
             if (host_thread_equal(t->host, h->thread)) {
                 th_name = t->name;
                 break;
             }
-#endif
         }
         fprintf(f, "      holder thread '%s' (%llu): readers=%u, writer=%u, pending=%u\n",
                 th_name, (unsigned long long)h->thread, h->readers, h->writer, h->pending);

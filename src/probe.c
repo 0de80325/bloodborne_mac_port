@@ -8,15 +8,8 @@
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
-#error This prototype requires x86-64 GCC or Clang (including MinGW).
+#error This prototype requires x86-64 GCC or Clang.
 #endif
-#ifdef _WIN32
-#include <windows.h>
-#include <mmsystem.h>
-#if defined(__GNUC__) || defined(__clang__)
-#include <cpuid.h>
-#endif
-#else
 #include <sys/mman.h>
 #include <unistd.h>
 #include <signal.h>
@@ -44,7 +37,6 @@
 #define UC_rbx REG_RBX
 #define UC_rsi REG_RSI
 #define UC_rsp REG_RSP
-#endif
 #endif
 /* Mach-O prefixes C symbols with '_': top-level asm must name them through SYM(). */
 #ifdef __APPLE__
@@ -130,11 +122,7 @@ int vulkan_smoke(void);
 static void fail(const char *message) {
     fprintf(stderr, "ERROR: %s\n", message);
     fflush(stderr);
-#ifdef _WIN32
-    TerminateProcess(GetCurrentProcess(), 1);
-#else
     exit(1);
-#endif
 }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
@@ -150,51 +138,17 @@ static void *allocate(size_t size) {
         CHECK_LOW_ADDR(low);
         return low;
     }
-#ifdef _WIN32
-    void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (!p) {
-        DWORD err = GetLastError();
-        fprintf(stderr, "Runtime ERROR: VirtualAlloc(size %zu) failed: Win32 error %lu\n", size, (unsigned long)err);
-        fail("VirtualAlloc failed");
-    }
-#else
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) fail("mmap failed");
-#endif
     CHECK_LOW_ADDR(p);
     return p;
 }
 static void protect(void *p, size_t size, unsigned flags) {
-#ifdef _WIN32
-    DWORD old, mode = PAGE_NOACCESS;
-    if (flags & 1) mode = (flags & 2) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
-    else if (flags & 2) mode = PAGE_READWRITE;
-    else if (flags & 4) mode = PAGE_READONLY;
-    if (!VirtualProtect(p, size, mode, &old)) fail("VirtualProtect failed");
-    FlushInstructionCache(GetCurrentProcess(), p, size);
-#else
     int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
     if (mprotect(p, size, mode)) fail("mprotect failed");
-#endif
 }
-#ifdef _WIN32
-static volatile uint64_t g_last_progress_tick = 0;
-static volatile int g_watchdog_running = 1;
-#endif
 
 void runtime_notify_progress(void) {
-#ifdef _WIN32
-    g_last_progress_tick = GetTickCount64();
-#endif
-}
-
-ABI void restore_guest_fs(void) {
-#ifdef _WIN32
-    void *tcb = runtime_thread_get_tcb();
-    if (tcb) {
-        __asm__ __volatile__("wrfsbase %0" : : "r"(tcb));
-    }
-#endif
 }
 
 static inline int check_noisy_import(const char *sym) {
@@ -371,7 +325,6 @@ SYM(common_dispatch) ":\n"
 "   mov 0(%rsp), %rdi\n"
 "   mov %rax, %rsi\n"
 "   call " SYM(post_import_hook) "\n"
-"   call " SYM(restore_guest_fs) "\n"
 "   mov 56(%rsp), %rax\n"
 "   mov 24(%rsp), %rdx\n"
 "   movdqu 80(%rsp), %xmm0\n"
@@ -380,746 +333,21 @@ SYM(common_dispatch) ":\n"
 "   ret\n"
 );
 
-/* Thread/hang dumps that inspect other threads use Win32 APIs; POSIX hosts use the
- * SIGALRM/SIGUSR2 dump further below. */
-#ifdef _WIN32
-static void print_code_loc(const char *prefix, uintptr_t addr) {
-    if (addr >= (uintptr_t)image && addr < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-        uintptr_t off = addr - (uintptr_t)image;
-        for (uint64_t m = 0; m < module_count; ++m) {
-            if (off >= modules[m].base && off < modules[m].base + modules[m].size) {
-                printf("%smodule %" PRIu64 " (%s) +0x%" PRIxPTR "\n", prefix, m, m == 0 ? "libc.prx" : "system module", off - modules[m].base);
-                return;
-            }
-        }
-        printf("%sguest eboot.bin +0x%" PRIxPTR "\n", prefix, off);
-    } else {
-        printf("%shost address 0x%" PRIxPTR "\n", prefix, addr);
-    }
-}
-
-static void dump_watchdog(void) {
-    printf("\n================================================================================\n");
-    printf(">>> WATCHDOG: NO PROGRESS FOR 5 SECONDS! THREAD & IMPORT DUMP <<<\n");
-    printf("================================================================================\n");
-
-    pthread_mutex_t *tlock = (pthread_mutex_t *)runtime_thread_get_lock();
-    if (tlock) pthread_mutex_lock(tlock);
-
-    for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-        if (t->finished) continue;
-        printf("\n--- Thread '%s' (TID %lu, host_owned=%d) ---\n", t->name, (unsigned long)t->win32_tid, t->host_owned);
-        if (t->blocked_on) {
-            printf("  State: BLOCKED on %s (resource 0x%" PRIx64 ")\n", t->blocked_on, t->blocked_resource);
-        } else {
-            printf("  State: RUNNING / SPINNING\n");
-        }
-
-#ifdef _WIN32
-        if (t->win32_handle) {
-            SuspendThread(t->win32_handle);
-            CONTEXT ctx = {0};
-            ctx.ContextFlags = CONTEXT_ALL;
-            if (GetThreadContext(t->win32_handle, &ctx)) {
-                printf("  Registers:\n");
-                printf("    RIP=0x%016llx  RSP=0x%016llx  RBP=0x%016llx\n",
-                       (unsigned long long)ctx.Rip, (unsigned long long)ctx.Rsp, (unsigned long long)ctx.Rbp);
-                printf("    RAX=0x%016llx  RBX=0x%016llx  RCX=0x%016llx  RDX=0x%016llx\n",
-                       (unsigned long long)ctx.Rax, (unsigned long long)ctx.Rbx, (unsigned long long)ctx.Rcx, (unsigned long long)ctx.Rdx);
-                printf("    RSI=0x%016llx  RDI=0x%016llx  R8 =0x%016llx  R9 =0x%016llx\n",
-                       (unsigned long long)ctx.Rsi, (unsigned long long)ctx.Rdi, (unsigned long long)ctx.R8, (unsigned long long)ctx.R9);
-                printf("    R10=0x%016llx  R11=0x%016llx  R12=0x%016llx  R13=0x%016llx\n",
-                       (unsigned long long)ctx.R10, (unsigned long long)ctx.R11, (unsigned long long)ctx.R12, (unsigned long long)ctx.R13);
-                printf("    R14=0x%016llx  R15=0x%016llx  EFLAGS=0x%08lx\n",
-                       (unsigned long long)ctx.R14, (unsigned long long)ctx.R15, (unsigned long)ctx.EFlags);
-
-                print_code_loc("  RIP Location: ", (uintptr_t)ctx.Rip);
-
-                unsigned char rip_bytes[16] = {0};
-                if (ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rip, rip_bytes, 16, NULL)) {
-                    printf("  Bytes at RIP: ");
-                    for (int b = 0; b < 16; ++b) printf("%02x ", rip_bytes[b]);
-                    printf("\n");
-                }
-
-                printf("  Stack Walk (RBP chain):\n");
-                uintptr_t cur_rbp = ctx.Rbp;
-                for (int f = 0; f < 20 && cur_rbp; ++f) {
-                    uintptr_t next_rbp = 0, ret_addr = 0;
-                    if (!ReadProcessMemory(GetCurrentProcess(), (void *)cur_rbp, &next_rbp, 8, NULL) ||
-                        !ReadProcessMemory(GetCurrentProcess(), (void *)(cur_rbp + 8), &ret_addr, 8, NULL)) {
-                        break;
-                    }
-                    char pfx[32];
-                    snprintf(pfx, sizeof(pfx), "    #%d 0x%016llx: ", f, (unsigned long long)ret_addr);
-                    print_code_loc(pfx, ret_addr);
-                    if (next_rbp <= cur_rbp || next_rbp > cur_rbp + 0x1000000) break;
-                    cur_rbp = next_rbp;
-                }
-
-                printf("  Stack Scan (code pointers on stack):\n");
-                uintptr_t stack_vals[256];
-                SIZE_T read_b = 0;
-                if (ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack_vals, sizeof(stack_vals), &read_b)) {
-                    int found = 0;
-                    for (size_t s = 0; s < read_b / 8 && found < 20; ++s) {
-                        uintptr_t val = stack_vals[s];
-                        if (val >= (uintptr_t)image && val < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-                            char pfx[64];
-                            snprintf(pfx, sizeof(pfx), "    [RSP+0x%x] = 0x%016llx: ", (unsigned)(s * 8), (unsigned long long)val);
-                            print_code_loc(pfx, val);
-                            found++;
-                        }
-                    }
-                }
-            }
-            ResumeThread(t->win32_handle);
-        }
-#endif
-    }
-    if (tlock) pthread_mutex_unlock(tlock);
-
-    printf("\n--- UNBOUND IMPORTS CALLED (Sorted by Call Count) ---\n");
-    int any_unbound = 0;
-    typedef struct { uint32_t idx; uint64_t count; } ImportStat;
-    ImportStat stats[1024];
-    uint32_t stat_count = 0;
-    for (uint64_t i = 0; i < import_count && stat_count < 1024; ++i) {
-        if (is_unbound[i] && import_call_counts[i] > 0) {
-            stats[stat_count++] = (ImportStat){(uint32_t)i, import_call_counts[i]};
-            any_unbound = 1;
-        }
-    }
-    for (uint32_t a = 0; a < stat_count; ++a) {
-        for (uint32_t b = a + 1; b < stat_count; ++b) {
-            if (stats[b].count > stats[a].count) {
-                ImportStat tmp = stats[a]; stats[a] = stats[b]; stats[b] = tmp;
-            }
-        }
-    }
-    for (uint32_t a = 0; a < stat_count; ++a) {
-        uint32_t i = stats[a].idx;
-        printf("  %5llu calls: %s (%s)\n", (unsigned long long)stats[a].count, names[i], runtime_import_name(names[i]));
-    }
-    if (!any_unbound) printf("  (None called)\n");
-
-    printf("\n--- TOP HOST IMPORTS CALLED ---\n");
-    stat_count = 0;
-    for (uint64_t i = 0; i < import_count && stat_count < 1024; ++i) {
-        if (!is_unbound[i] && import_call_counts[i] > 0) {
-            stats[stat_count++] = (ImportStat){(uint32_t)i, import_call_counts[i]};
-        }
-    }
-    for (uint32_t a = 0; a < stat_count; ++a) {
-        for (uint32_t b = a + 1; b < stat_count; ++b) {
-            if (stats[b].count > stats[a].count) {
-                ImportStat tmp = stats[a]; stats[a] = stats[b]; stats[b] = tmp;
-            }
-        }
-    }
-    uint32_t limit = stat_count < 20 ? stat_count : 20;
-    for (uint32_t a = 0; a < limit; ++a) {
-        uint32_t i = stats[a].idx;
-        printf("  %8llu calls: %s (%s)\n", (unsigned long long)stats[a].count, names[i], runtime_import_name(names[i]));
-    }
-
-    printf("================================================================================\n\n");
-    fflush(stdout);
-}
-
-#endif
-
 static char g_run_timestamp[32];
 
-#ifdef _WIN32
-static void dump_hang_snapshot(const char *path, uint64_t elapsed_s, uint64_t cur_flips, uint64_t cur_submits, uint64_t now) {
-    FILE *f = fopen(path, "w");
-    if (!f) return;
-    fprintf(f, "================================================================================\n");
-    fprintf(f, "=== BLOODBORNE HANG SNAPSHOT (Elapsed %llus, Flips: %llu, Submits: %llu) ===\n",
-            (unsigned long long)elapsed_s, (unsigned long long)cur_flips, (unsigned long long)cur_submits);
-    fprintf(f, "================================================================================\n\n");
-
-    pthread_mutex_t *tlock = (pthread_mutex_t *)runtime_thread_get_lock();
-    if (tlock) pthread_mutex_lock(tlock);
-
-    for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-        if (t->finished) continue;
-        uint64_t wait_ms = (t->blocked_tick && now >= t->blocked_tick) ? (now - t->blocked_tick) : 0;
-        const char *wait_reason = t->blocked_on ? t->blocked_on : "running/unblocked";
-        uint64_t wait_res = t->blocked_resource;
-
-        uintptr_t rip = 0, rsp = 0, rbp = 0;
-#ifdef _WIN32
-        HANDLE th = t->win32_handle;
-        DWORD tid = t->win32_tid;
-        int need_close = 0;
-        if (!th && tid) {
-            th = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME | THREAD_QUERY_INFORMATION, FALSE, tid);
-            need_close = 1;
-        }
-        if (th && tid != GetCurrentThreadId()) {
-            if (SuspendThread(th) != (DWORD)-1) {
-                CONTEXT ctx;
-                memset(&ctx, 0, sizeof(ctx));
-                ctx.ContextFlags = CONTEXT_ALL;
-                if (GetThreadContext(th, &ctx)) {
-                    rip = ctx.Rip;
-                    rsp = ctx.Rsp;
-                    rbp = ctx.Rbp;
-                }
-                ResumeThread(th);
-            }
-        }
-        if (need_close && th) CloseHandle(th);
-#endif
-        fprintf(f, "Thread '%s' (TID %lu, host_owned=%d):\n", t->name, (unsigned long)t->win32_tid, t->host_owned);
-        fprintf(f, "  Wait State: %s (resource 0x%" PRIx64 "), waited: %.2fs\n",
-                wait_reason, wait_res, (double)wait_ms / 1000.0);
-        if (t->blocked_on) {
-            if (!strcmp(t->blocked_on, "rwlock_read") || !strcmp(t->blocked_on, "rwlock_write")) {
-                runtime_rwlock_dump_info(f, (void *)(uintptr_t)wait_res);
-            } else if (!strcmp(t->blocked_on, "mutex") || !strcmp(t->blocked_on, "mutex_timed")) {
-                runtime_mutex_dump_info(f, (void *)(uintptr_t)wait_res);
-            }
-        }
-
-        char loc[256];
-        if (rip >= (uintptr_t)image && rip < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-            uintptr_t off = rip - (uintptr_t)image;
-            int found_mod = 0;
-            for (uint64_t m = 0; m < module_count; ++m) {
-                if (off >= modules[m].base && off < modules[m].base + modules[m].size) {
-                    snprintf(loc, sizeof(loc), "module %" PRIu64 " (%s) +0x%" PRIxPTR,
-                             m, m == 0 ? "libc.prx" : "system module", off - modules[m].base);
-                    found_mod = 1;
-                    break;
-                }
-            }
-            if (!found_mod) snprintf(loc, sizeof(loc), "guest eboot.bin +0x%" PRIxPTR, off);
-        } else if (rip) {
-            snprintf(loc, sizeof(loc), "host address 0x%" PRIxPTR, rip);
-        } else {
-            snprintf(loc, sizeof(loc), "unknown / current thread");
-        }
-        fprintf(f, "  Top frame: RIP=0x%" PRIxPTR " (%s), RSP=0x%" PRIxPTR ", RBP=0x%" PRIxPTR "\n", rip, loc, rsp, rbp);
-
-        if (rsp && rsp < (1ULL << 40)) {
-            uintptr_t *stack_ptr = (uintptr_t *)rsp;
-            if (!IsBadReadPtr(stack_ptr, 32 * sizeof(uintptr_t))) {
-                int frames_printed = 0;
-                for (int si = 0; si < 32 && frames_printed < 8; ++si) {
-                    uintptr_t val = stack_ptr[si];
-                    if (val >= (uintptr_t)image && val < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-                        uintptr_t off = val - (uintptr_t)image;
-                        fprintf(f, "    [frame +0x%x] 0x%" PRIxPTR " (guest eboot.bin +0x%" PRIxPTR ")\n", si * 8, val, off);
-                        frames_printed++;
-                    }
-                }
-            }
-        }
-        fprintf(f, "\n");
-    }
-    if (tlock) pthread_mutex_unlock(tlock);
-
-    if (gpu_enabled) {
-        bbgpu_dump_host_threads_hang(f);
-        bbgpu_dump_breadcrumbs(f);
-    }
-
-    fprintf(f, "=== MOMAINTHREAD RECENT IMPORTS (Total Calls: %llu) ===\n", (unsigned long long)mo_total_import_count);
-    uint32_t n_calls = mo_recent_count < MO_RING_CAP ? mo_recent_count : MO_RING_CAP;
-    uint32_t start_idx = mo_recent_count > MO_RING_CAP ? (mo_recent_count - MO_RING_CAP) : 0;
-    for (uint32_t c = 0; c < n_calls; ++c) {
-        uint32_t idx_in_ring = (start_idx + c) % MO_RING_CAP;
-        uint32_t imp_idx = mo_recent_calls[idx_in_ring].index;
-        const char *name = imp_idx < import_count ? names[imp_idx] : "unknown";
-        const char *sym = runtime_import_name(name);
-        uint64_t *a = mo_recent_calls[idx_in_ring].args;
-        fprintf(f, "  #%u: %s (%s) args=(0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ")\n",
-                c + 1, name, sym ? sym : "unknown", a[0], a[1], a[2], a[3], a[4], a[5]);
-    }
-    if (mo_call_counts) {
-        fprintf(f, "\n=== MOMAINTHREAD TOP REPEATED IMPORTS ===\n");
-        typedef struct { uint32_t idx; uint64_t count; } MoTop;
-        MoTop top[64];
-        uint32_t top_len = 0;
-        for (uint64_t i = 0; i < import_count; ++i) {
-            if (mo_call_counts[i] > 0) {
-                if (top_len < 64) {
-                    top[top_len++] = (MoTop){(uint32_t)i, mo_call_counts[i]};
-                } else {
-                    uint32_t min_j = 0;
-                    for (uint32_t j = 1; j < 64; ++j) {
-                        if (top[j].count < top[min_j].count) min_j = j;
-                    }
-                    if (mo_call_counts[i] > top[min_j].count) {
-                        top[min_j] = (MoTop){(uint32_t)i, mo_call_counts[i]};
-                    }
-                }
-            }
-        }
-        for (uint32_t a = 0; a < top_len; ++a) {
-            for (uint32_t b = a + 1; b < top_len; ++b) {
-                if (top[b].count > top[a].count) {
-                    MoTop tmp = top[a]; top[a] = top[b]; top[b] = tmp;
-                }
-            }
-        }
-        for (uint32_t a = 0; a < (top_len < 10 ? top_len : 10); ++a) {
-            uint32_t i = top[a].idx;
-            fprintf(f, "  %llu calls: %s (%s)\n", (unsigned long long)top[a].count, names[i], runtime_import_name(names[i]));
-        }
-    }
-    fprintf(f, "\n");
-
-    fprintf(f, "=== END SNAPSHOT ===\n");
-    fflush(f);
-    fclose(f);
-    printf("\n[WATCHDOG] Flips stalled for 5s: snapshot written to %s\n\n", path);
-    fflush(stdout);
-}
-
-static DWORD WINAPI watchdog_worker(LPVOID param) {
-    (void)param;
-    uint64_t last_flips = 0;
-    uint64_t last_submits = 0;
-    uint64_t last_imports = 0;
-    uint64_t start_tick = GetTickCount64();
-    uint64_t last_dump_tick = 0;
-    uint64_t zero_flip_seconds = 0;
-    int hang_dump_written = 0;
-
-    char hb_ts_path[128];
-    if (g_run_timestamp[0]) snprintf(hb_ts_path, sizeof(hb_ts_path), "out/heartbeat_%s.log", g_run_timestamp);
-    else snprintf(hb_ts_path, sizeof(hb_ts_path), "out/heartbeat.log");
-
-    FILE *f_heartbeat_ts = (g_bb_trace && g_run_timestamp[0]) ? fopen(hb_ts_path, "w") : NULL;
-    FILE *f_heartbeat = g_bb_trace ? fopen("out/heartbeat.log", "w") : NULL;
-
-    while (g_watchdog_running) {
-        Sleep(1000);
-        uint64_t now = GetTickCount64();
-        uint64_t elapsed_s = (now - start_tick) / 1000;
-
-        uint64_t cur_flips = gpu_enabled ? bbgpu_get_flip_count() : 0;
-        uint64_t cur_submits = gpu_enabled ? bbgpu_get_submit_count() : 0;
-        uint64_t cur_imports = g_total_import_calls;
-
-        uint64_t flip_delta = cur_flips >= last_flips ? cur_flips - last_flips : 0;
-        uint64_t submit_delta = cur_submits >= last_submits ? cur_submits - last_submits : 0;
-        uint64_t import_delta = cur_imports >= last_imports ? cur_imports - last_imports : 0;
-
-        last_flips = cur_flips;
-        last_submits = cur_submits;
-        last_imports = cur_imports;
-
-        g_stat_total_seconds = elapsed_s;
-        if (cur_flips == 0 || flip_delta == 0) {
-            zero_flip_seconds++;
-            g_stat_zero_flip_seconds++;
-            g_stat_current_freeze_s = zero_flip_seconds;
-            if (zero_flip_seconds > g_stat_longest_freeze_s) {
-                g_stat_longest_freeze_s = zero_flip_seconds;
-            }
-        } else {
-            zero_flip_seconds = 0;
-            g_stat_current_freeze_s = 0;
-            hang_dump_written = 0;
-        }
-
-        if (g_bb_trace) {
-            if (zero_flip_seconds >= 5 && !hang_dump_written) {
-                hang_dump_written = 1;
-                char dump_ts_path[128];
-                if (g_run_timestamp[0]) {
-                    snprintf(dump_ts_path, sizeof(dump_ts_path), "out/hang_dump_%s.log", g_run_timestamp);
-                    dump_hang_snapshot(dump_ts_path, elapsed_s, cur_flips, cur_submits, now);
-                }
-                dump_hang_snapshot("out/hang_dump.log", elapsed_s, cur_flips, cur_submits, now);
-            }
-
-            pthread_mutex_t *tlock = (pthread_mutex_t *)runtime_thread_get_lock();
-            if (tlock) pthread_mutex_lock(tlock);
-
-            uint32_t active_threads = 0;
-            for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-                if (!t->finished) active_threads++;
-            }
-
-            printf("[HEARTBEAT %llus] flips: %llu (+%llu/s) | gpu_submits: %llu (+%llu/s) | imports/s: %llu | threads: %u\n",
-                   (unsigned long long)elapsed_s,
-                   (unsigned long long)cur_flips, (unsigned long long)flip_delta,
-                   (unsigned long long)cur_submits, (unsigned long long)submit_delta,
-                   (unsigned long long)import_delta,
-                   active_threads);
-
-            if (f_heartbeat) {
-                fprintf(f_heartbeat, "[HEARTBEAT %llus] flips: %llu (+%llu/s) | gpu_submits: %llu (+%llu/s) | imports/s: %llu | threads: %u\n",
-                        (unsigned long long)elapsed_s,
-                        (unsigned long long)cur_flips, (unsigned long long)flip_delta,
-                        (unsigned long long)cur_submits, (unsigned long long)submit_delta,
-                        (unsigned long long)import_delta,
-                        active_threads);
-            }
-            if (f_heartbeat_ts) {
-                fprintf(f_heartbeat_ts, "[HEARTBEAT %llus] flips: %llu (+%llu/s) | gpu_submits: %llu (+%llu/s) | imports/s: %llu | threads: %u\n",
-                        (unsigned long long)elapsed_s,
-                        (unsigned long long)cur_flips, (unsigned long long)flip_delta,
-                        (unsigned long long)cur_submits, (unsigned long long)submit_delta,
-                        (unsigned long long)import_delta,
-                        active_threads);
-            }
-
-            for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-                if (!t->finished && t->blocked_on && t->blocked_tick && (now - t->blocked_tick >= 3000)) {
-                    double wait_s = (double)(now - t->blocked_tick) / 1000.0;
-                    printf("  [BLOCKED >3s] Thread '%s' (TID %lu) waiting on %s (res 0x%" PRIx64 ") for %.1fs\n",
-                           t->name, (unsigned long)t->win32_tid, t->blocked_on, t->blocked_resource, wait_s);
-                    if (f_heartbeat) {
-                        fprintf(f_heartbeat, "  [BLOCKED >3s] Thread '%s' (TID %lu) waiting on %s (res 0x%" PRIx64 ") for %.1fs\n",
-                                t->name, (unsigned long)t->win32_tid, t->blocked_on, t->blocked_resource, wait_s);
-                    }
-                    if (f_heartbeat_ts) {
-                        fprintf(f_heartbeat_ts, "  [BLOCKED >3s] Thread '%s' (TID %lu) waiting on %s (res 0x%" PRIx64 ") for %.1fs\n",
-                                t->name, (unsigned long)t->win32_tid, t->blocked_on, t->blocked_resource, wait_s);
-                    }
-                }
-            }
-
-            if (tlock) pthread_mutex_unlock(tlock);
-
-            fflush(stdout);
-            if (f_heartbeat) fflush(f_heartbeat);
-            if (f_heartbeat_ts) fflush(f_heartbeat_ts);
-            if (g_import_file) fflush(g_import_file);
-
-            if (g_last_progress_tick != 0 && (now - g_last_progress_tick >= 10000)) {
-                if (now - last_dump_tick >= 10000) {
-                    last_dump_tick = now;
-                    dump_watchdog();
-                }
-            }
-        }
-        if (elapsed_s > 0 && (elapsed_s % 10 == 0)) {
-            double avg_fps = 0.0, p95_ms = 0.0, p99_ms = 0.0;
-            if (gpu_enabled) {
-                bbgpu_get_frametime_percentiles(&avg_fps, &p95_ms, &p99_ms);
-            }
-            if (avg_fps <= 0.0 && elapsed_s > 0) {
-                avg_fps = (double)cur_flips / (double)elapsed_s;
-            }
-            uint64_t audio_underruns = runtime_audio_get_underruns();
-            FILE *f_sum = fopen("out/summary.log", "w");
-            if (f_sum) {
-                fprintf(f_sum, "=== BLOODBORNE 10S SUMMARY ===\n");
-                fprintf(f_sum, "Elapsed:         %llu s\n", (unsigned long long)elapsed_s);
-                fprintf(f_sum, "Total Flips:     %llu\n", (unsigned long long)cur_flips);
-                fprintf(f_sum, "Average Flips/s: %.2f\n", avg_fps);
-                fprintf(f_sum, "p95 Frame Time:  %.2f ms\n", p95_ms);
-                fprintf(f_sum, "p99 Frame Time:  %.2f ms\n", p99_ms);
-                fprintf(f_sum, "Audio Underruns: %llu\n", (unsigned long long)audio_underruns);
-                fflush(f_sum);
-                fclose(f_sum);
-            }
-        }
-    }
-    if (f_heartbeat) fclose(f_heartbeat);
-    if (f_heartbeat_ts) fclose(f_heartbeat_ts);
-    return 0;
-}
-
-static void start_watchdog(void) {
-    const char *env_wd = getenv("BB_WATCHDOG");
-    if (env_wd && (!strcmp(env_wd, "0") || !strcmp(env_wd, "off") || !strcmp(env_wd, "false"))) {
-        printf("[WATCHDOG] Watchdog thread disabled (BB_WATCHDOG=0).\n");
-        return;
-    }
-    g_last_progress_tick = GetTickCount64();
-    CreateThread(NULL, 0, watchdog_worker, NULL, 0, NULL);
-}
-
-static DWORD WINAPI timeout_worker(LPVOID param) {
-    DWORD sec = (DWORD)(uintptr_t)param;
-    if (sec > 0) {
-        Sleep(sec * 1000);
-        printf("\n[TIMEOUT] Reached timeout of %lu seconds, terminating cleanly.\n", (unsigned long)sec);
-        fflush(stdout);
-        print_exit_summary();
-        ExitProcess(0);
-    }
-    return 0;
-}
-static void start_timeout(unsigned seconds) {
-    if (seconds > 0) {
-        CreateThread(NULL, 0, timeout_worker, (LPVOID)(uintptr_t)seconds, 0, NULL);
-    }
-}
-#else
-static void start_watchdog(void) {}
 static void start_timeout(unsigned seconds) {
     alarm(seconds);
 }
-#endif
-#ifdef _WIN32
-void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(
-".text\n"
-".globl enter_on_stack\n"
-"enter_on_stack:\n"
-"   push %rbp\n"
-"   mov %rsp, %rbp\n"
-"   push %r12\n"
-"   push %r13\n"
-"   push %r14\n"
-"   push %r15\n"
-"   mov %gs:0x8, %r12\n"
-"   mov %gs:0x10, %r13\n"
-"   mov %rcx, %r14\n" /* save entry */
-"   mov %rdx, %r15\n" /* save arg0 */
-"   mov %r8, %r11\n"  /* save arg1 */
-"   mov %r9, %rsp\n"
-"   and $-16, %rsp\n"
-"   mov %rsp, %gs:0x8\n"
-"   sub $0x800000, %r9\n"
-"   mov %r9, %gs:0x10\n"
-"   sub $0x20, %rsp\n"
-"   mov %r11, 0x18(%rsp)\n" /* preserve arg1 across call */
-"   call runtime_thread_get_tcb\n"
-"   wrfsbase %rax\n"
-"   mov %r14, %r11\n"
-"   mov %r15, %rdi\n"
-"   mov 0x18(%rsp), %rsi\n"
-"   call *%r11\n"
-"   add $0x20, %rsp\n"
-"   mov %r12, %gs:0x8\n"
-"   mov %r13, %gs:0x10\n"
-"   lea -0x20(%rbp), %rsp\n"
-"   pop %r15\n"
-"   pop %r14\n"
-"   pop %r13\n"
-"   pop %r12\n"
-"   pop %rbp\n"
-"   ret\n"
-);
-static void veh_write(const char *msg) {
-    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-    if (h != INVALID_HANDLE_VALUE && h != NULL) {
-        DWORD written;
-        WriteFile(h, msg, (DWORD)strlen(msg), &written, NULL);
-    }
-}
-
-static void write_crash_dump(EXCEPTION_POINTERS *ep, void *fault_addr, uintptr_t rip, DWORD code) {
-    char crash_path[MAX_PATH];
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    snprintf(crash_path, sizeof(crash_path), "out/crash_%04d%02d%02d_%02d%02d%02d.log",
-             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    FILE *f = fopen(crash_path, "w");
-    if (!f) return;
-
-    uintptr_t off = (rip >= (uintptr_t)image && rip < (uintptr_t)image + (image_size ? image_size : 0x20000000))
-                    ? (rip - (uintptr_t)image) : 0;
-    fprintf(f, "================================================================================\n");
-    fprintf(f, "=== BLOODBORNE CRASH DUMP ===\n");
-    fprintf(f, "================================================================================\n\n");
-    fprintf(f, "Exception Code: 0x%08lx\n", code);
-    fprintf(f, "Fault Address:  %p\n", fault_addr);
-    if (off) fprintf(f, "Faulting RIP:   %p (guest eboot.bin offset 0x%" PRIxPTR ")\n\n", (void *)rip, off);
-    else fprintf(f, "Faulting RIP:   %p (host address)\n\n", (void *)rip);
-
-    CONTEXT *c = ep->ContextRecord;
-    fprintf(f, "--- REGISTERS ---\n");
-    fprintf(f, "RAX=%016llx RBX=%016llx RCX=%016llx RDX=%016llx\n",
-            (unsigned long long)c->Rax, (unsigned long long)c->Rbx, (unsigned long long)c->Rcx, (unsigned long long)c->Rdx);
-    fprintf(f, "RSI=%016llx RDI=%016llx RBP=%016llx RSP=%016llx\n",
-            (unsigned long long)c->Rsi, (unsigned long long)c->Rdi, (unsigned long long)c->Rbp, (unsigned long long)c->Rsp);
-    fprintf(f, "R8 =%016llx R9 =%016llx R10=%016llx R11=%016llx\n",
-            (unsigned long long)c->R8,  (unsigned long long)c->R9,  (unsigned long long)c->R10, (unsigned long long)c->R11);
-    fprintf(f, "R12=%016llx R13=%016llx R14=%016llx R15=%016llx\n",
-            (unsigned long long)c->R12, (unsigned long long)c->R13, (unsigned long long)c->R14, (unsigned long long)c->R15);
-    void *cur_fs = NULL;
-    __asm__ __volatile__("rdfsbase %0" : "=r"(cur_fs));
-    fprintf(f, "RIP=%016llx EFLAGS=%08lx FS_BASE=%p GS_SELECTOR=0x%x\n\n",
-            (unsigned long long)c->Rip, (unsigned long)c->EFlags, cur_fs, (unsigned int)c->SegGs);
-
-    fprintf(f, "--- STACK WALK (16 FRAMES) ---\n");
-    uintptr_t rsp = c->Rsp;
-    if (rsp && rsp < (1ULL << 46)) {
-        uintptr_t *stack_ptr = (uintptr_t *)rsp;
-        if (!IsBadReadPtr(stack_ptr, 16 * sizeof(uintptr_t))) {
-            for (int i = 0; i < 16; ++i) {
-                uintptr_t val = stack_ptr[i];
-                char loc[256];
-                if (val >= (uintptr_t)image && val < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-                    uintptr_t val_off = val - (uintptr_t)image;
-                    int found_mod = 0;
-                    for (uint64_t m = 0; m < module_count; ++m) {
-                        if (val_off >= modules[m].base && val_off < modules[m].base + modules[m].size) {
-                            snprintf(loc, sizeof(loc), "module %" PRIu64 " +0x%" PRIxPTR, m, val_off - modules[m].base);
-                            found_mod = 1;
-                            break;
-                        }
-                    }
-                    if (!found_mod) snprintf(loc, sizeof(loc), "guest eboot.bin +0x%" PRIxPTR, val_off);
-                } else {
-                    snprintf(loc, sizeof(loc), "host / stack data");
-                }
-                fprintf(f, "  [frame +0x%02x] %016llx (%s)\n", i * 8, (unsigned long long)val, loc);
-            }
-        }
-    }
-
-    fprintf(f, "\n--- GUEST RBP FRAME CHAIN ---\n");
-    uintptr_t rbp = c->Rbp;
-    for (int frame = 0; frame < 16 && rbp && rbp < (1ULL << 46); ++frame) {
-        if (IsBadReadPtr((void *)rbp, 16)) break;
-        uintptr_t *rbp_ptr = (uintptr_t *)rbp;
-        uintptr_t next_rbp = rbp_ptr[0];
-        uintptr_t ret_addr = rbp_ptr[1];
-        if (!ret_addr) break;
-        char loc[256];
-        if (ret_addr >= (uintptr_t)image && ret_addr < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-            uintptr_t val_off = ret_addr - (uintptr_t)image;
-            snprintf(loc, sizeof(loc), "guest eboot.bin +0x%" PRIxPTR, val_off);
-        } else {
-            snprintf(loc, sizeof(loc), "host %p", (void *)ret_addr);
-        }
-        fprintf(f, "  [rbp frame %2d] ret=%016llx (%s)\n", frame, (unsigned long long)ret_addr, loc);
-        if (next_rbp <= rbp) break;
-        rbp = next_rbp;
-    }
-
-    fprintf(f, "\n--- LAST 32 IMPORTS OF FAULTING THREAD ---\n");
-    GuestThread *cur = runtime_thread_current();
-    if (cur) {
-        fprintf(f, "Thread: '%s' (TID %lu, total thread imports: %u)\n", cur->name, (unsigned long)cur->win32_tid, cur->recent_import_count);
-        uint32_t count = cur->recent_import_count < 32 ? cur->recent_import_count : 32;
-        uint32_t start = cur->recent_import_count > 32 ? (cur->recent_import_count - 32) : 0;
-        for (uint32_t i = 0; i < count; ++i) {
-            uint32_t idx = cur->recent_imports[(start + i) & 31];
-            const char *name = (idx < import_count) ? names[idx] : "unknown";
-            const char *sym = runtime_import_name(name);
-            fprintf(f, "  #%2u: idx %4u - %s (%s)\n", i + 1, idx, name, sym ? sym : "unknown");
-        }
-    } else {
-        fprintf(f, "  (No guest thread context available)\n");
-    }
-
-    runtime_memory_dump_recent_ops(f);
-    if (gpu_enabled) bbgpu_dump_breadcrumbs(f);
-    fflush(f);
-    fclose(f);
-    char note[256];
-    snprintf(note, sizeof(note), "Crash details written to %s\n", crash_path);
-    veh_write(note);
-}
-
-static LONG WINAPI win_veh_handler(EXCEPTION_POINTERS *ep) {
-    DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code == EXCEPTION_ACCESS_VIOLATION) {
-        void *fault_addr = (void *)ep->ExceptionRecord->ExceptionInformation[1];
-        uintptr_t rip = ep->ContextRecord->Rip;
-        // Save the 128-byte System V AMD64 Red Zone [RSP-128 .. RSP] before any handler runs.
-        // Windows kernel exception dispatch (KiUserExceptionDispatch) pushes its frame below RSP,
-        // which clobbers variables (like -0x60(%rsp)) used by PS4 guest functions.
-        char red_zone_backup[128];
-        uintptr_t red_zone_rsp = ep->ContextRecord->Rsp;
-        int has_red_zone = 0;
-        if (red_zone_rsp >= 128 && red_zone_rsp < (1ULL << 46)) {
-            memcpy(red_zone_backup, (void *)(red_zone_rsp - 128), 128);
-            has_red_zone = 1;
-        }
-
-        unsigned char *ip = (unsigned char *)rip;
-        if (ip && ip[0] == 0x64) {
-            void *tcb = runtime_thread_get_tcb();
-            if (tcb) {
-                __asm__ __volatile__("wrfsbase %0" : : "r"(tcb));
-                if (ip[1] == 0x48 && ip[2] == 0x8b && ip[3] == 0x04 && ip[4] == 0x25 &&
-                    ip[5] == 0x00 && ip[6] == 0x00 && ip[7] == 0x00 && ip[8] == 0x00) {
-                    ep->ContextRecord->Rax = *(DWORD64 *)tcb;
-                    ep->ContextRecord->Rip += 9;
-                }
-                if (has_red_zone) memcpy((void *)(red_zone_rsp - 128), red_zone_backup, 128);
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-        }
-        if (gpu_enabled && bbgpu_handle_fault(ep, fault_addr)) {
-            if (has_red_zone) memcpy((void *)(red_zone_rsp - 128), red_zone_backup, 128);
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-        if (rip >= (uintptr_t)image && rip < (uintptr_t)image + (image_size ? image_size : 0x20000000)) {
-            uintptr_t off = rip - (uintptr_t)image;
-            // Function 0x28ce7b0 is the particle/blood stream vertex generator.
-            // On Windows, if VRAM pressure or page-tracking clobbers its System V Red Zone (-0x60(%rsp)),
-            // or if vertex stream pointers are uninitialized, safely unroll the frame and return to caller.
-            if (off >= 0x28ce7ba && off < 0x28ceeb8) {
-                uintptr_t rsp = ep->ContextRecord->Rsp;
-                ep->ContextRecord->Rbx = *(DWORD64 *)(rsp + 0x30);
-                ep->ContextRecord->R12 = *(DWORD64 *)(rsp + 0x38);
-                ep->ContextRecord->R13 = *(DWORD64 *)(rsp + 0x40);
-                ep->ContextRecord->R14 = *(DWORD64 *)(rsp + 0x48);
-                ep->ContextRecord->R15 = *(DWORD64 *)(rsp + 0x50);
-                ep->ContextRecord->Rbp = *(DWORD64 *)(rsp + 0x58);
-                ep->ContextRecord->Rip = *(DWORD64 *)(rsp + 0x60);
-                ep->ContextRecord->Rsp = rsp + 0x68;
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-        }
-        if (runtime_fault_recover) {
-            RuntimeRecoverBuf *recover = runtime_fault_recover;
-            runtime_fault_recover = NULL;
-            RUNTIME_RECOVER_JUMP(*recover);
-        }
-        write_crash_dump(ep, fault_addr, rip, code);
-        char line[512];
-        if (rip - (uintptr_t)image < 0x10000000)
-            snprintf(line, sizeof(line), "Guest fault (signal 11) at guest offset 0x%llx, address %p\n",
-                     (unsigned long long)(rip - (uintptr_t)image), fault_addr);
-        else
-            snprintf(line, sizeof(line), "Fault at RIP %p, address %p\n", (void *)rip, fault_addr);
-        veh_write(line);
-        snprintf(line, sizeof(line), "RAX=%p RBX=%p RCX=%p RDX=%p RSI=%p RDI=%p RBP=%p RSP=%p\n",
-                 (void *)ep->ContextRecord->Rax, (void *)ep->ContextRecord->Rbx,
-                 (void *)ep->ContextRecord->Rcx, (void *)ep->ContextRecord->Rdx,
-                 (void *)ep->ContextRecord->Rsi, (void *)ep->ContextRecord->Rdi,
-                 (void *)ep->ContextRecord->Rbp, (void *)ep->ContextRecord->Rsp);
-        veh_write(line);
-        void *cur_fs = NULL;
-        __asm__ __volatile__("rdfsbase %0" : "=r"(cur_fs));
-        snprintf(line, sizeof(line), "FS_BASE=%p GS_SELECTOR=0x%x\n", cur_fs, (unsigned int)ep->ContextRecord->SegGs);
-        veh_write(line);
-        if (gpu_enabled) bbgpu_dump_guest_writes(ep);
-        TerminateProcess(GetCurrentProcess(), 128 + 11);
-    } else if (code == EXCEPTION_ILLEGAL_INSTRUCTION) {
-        uintptr_t rip = ep->ContextRecord->Rip;
-        write_crash_dump(ep, (void *)rip, rip, code);
-        char line[512];
-        if (rip - (uintptr_t)image < 0x10000000)
-            snprintf(line, sizeof(line), "Guest fault (signal 4) at guest offset 0x%llx, address %p\n",
-                     (unsigned long long)(rip - (uintptr_t)image), (void *)rip);
-        else
-            snprintf(line, sizeof(line), "Fault (signal 4) at RIP %p, address %p\n", (void *)rip, (void *)rip);
-        veh_write(line);
-        TerminateProcess(GetCurrentProcess(), 128 + 4);
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-#else
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
 __asm__(".text\n.globl " SYM(enter_on_stack) "\n" SYM(enter_on_stack) ":\n"
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
-#endif
 static ABI void guest_exit(void) {
     puts("Runtime: process finalizer callback reached");
     print_exit_summary();
 }
-#ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. macOS reports a
      * write to a mapped read-only page as SIGBUS, not SIGSEGV. */
@@ -1157,18 +385,6 @@ static void fault(int sig, siginfo_t *info, void *context) {
              (unsigned long long)UC_REG(uc, rdi), (unsigned long long)UC_REG(uc, rsi),
              (unsigned long long)UC_REG(uc, rsp));
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
-    if (getenv("BB_FAULT_DUMP")) { /* TEMP diagnostic: object at rbx, twice, 100 ms apart */
-        const uint64_t *o = (const uint64_t *)(uintptr_t)UC_REG(uc, rbx);
-        for (int pass = 0; pass < 2; ++pass) {
-            for (int i = 0; i < 48; i += 4) {
-                snprintf(line, sizeof(line), "  [%d] +%#05x: %016llx %016llx %016llx %016llx\n", pass, i * 8,
-                         (unsigned long long)o[i], (unsigned long long)o[i + 1],
-                         (unsigned long long)o[i + 2], (unsigned long long)o[i + 3]);
-                ssize_t written_=write(2, line, strlen(line)); (void)written_;
-            }
-            usleep(100000);
-        }
-    }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];
@@ -1183,10 +399,8 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     _exit(128 + sig);
 }
-#endif
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
-#ifndef _WIN32
 static uintptr_t exe_base;
 static void write_hex(char *out, uint64_t v) {
     const char digits[] = "0123456789abcdef";
@@ -1249,7 +463,6 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     usleep(100000);
     _exit(128 + sig);
 }
-#endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -1320,7 +533,6 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
  * released before the new process opens its own. */
 void runtime_restart(void) {
     fflush(NULL);
-#ifndef _WIN32
     puts("Runtime: restarting through run.sh");
 #ifdef __APPLE__
     for (int fd=3, end=getdtablesize(); fd<end; ++fd) close(fd);
@@ -1330,20 +542,6 @@ void runtime_restart(void) {
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);
-#else
-    puts("Runtime: restarting through run.bat");
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    char cmd[] = "cmd.exe /c run.bat";
-    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        print_exit_summary();
-        ExitProcess(0);
-    } else {
-        fail("runtime_restart: CreateProcess failed");
-    }
-#endif
 }
 
 #ifdef __APPLE__
@@ -1374,19 +572,13 @@ static int probe_main(int argc, char **argv) {
 int main(int argc, char **argv) {
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifdef _WIN32
-    runtime_memory_reserve_space();
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     /* Before SDL/MoltenVK map anything: on macOS large host mmaps land in the guest range. */
     if (runtime_memory_reserve_space()) fail("cannot reserve guest address range");
 #endif
     time_t t_now = time(NULL);
     struct tm tm_buf;
-#ifdef _WIN32
-    localtime_s(&tm_buf, &t_now);
-#else
     localtime_r(&t_now, &tm_buf);
-#endif
     strftime(g_run_timestamp, sizeof(g_run_timestamp), "%Y%m%d_%H%M%S", &tm_buf);
 
     const char *env_trace = getenv("BB_TRACE");
@@ -1454,17 +646,6 @@ int main(int argc, char **argv) {
             runtime_savedata_configure(id);
     }
     bbgpu_register_kernel();
-#ifdef _WIN32
-    timeBeginPeriod(1);
-    int cpuinfo[4] = {0};
-    __cpuid_count(7, 0, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
-    if (!(cpuinfo[1] & 1)) {
-        fprintf(stderr, "Warning: CPU does not support FSGSBASE instructions (wrfsbase/rdfsbase).\n");
-    }
-    SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
-    AddVectoredExceptionHandler(1, win_veh_handler);
-    start_timeout(timeout_seconds);
-#else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
@@ -1476,7 +657,6 @@ int main(int argc, char **argv) {
     struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
     sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
     start_timeout(timeout_seconds);
-#endif
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
     char magic[8];
@@ -1694,7 +874,6 @@ int main(int argc, char **argv) {
     enum { MAIN_STACK=8*1024*1024 };
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
     if (!stack) fail("cannot allocate guest main stack");
-    start_watchdog();
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
     fail("entry unexpectedly returned");
     return 1;

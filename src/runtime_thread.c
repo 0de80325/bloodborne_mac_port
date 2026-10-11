@@ -1,8 +1,7 @@
 /* Guest threads on host threads. Each guest thread owns a FreeBSD-style TCB
  * (variant II: static TLS below the TCB). The loader rewrites the eboot's
  * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
- * keeps FS. On Windows GS is the TEB: the loader points the instruction at a TEB
- * TLS slot that holds the guest TCB instead. On macOS GS base is the pthread TSD
+ * keeps FS. On macOS GS base is the pthread TSD
  * array and cannot be moved: the loader emits `mov rax, gs:[TCB_KEY*8]` instead
  * (link_*.py --gs-slot, default on darwin) and each thread stores its TCB in that
  * pthread key, reserved at startup below.
@@ -14,12 +13,6 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <malloc.h>
-#define EXIT_SET(buf) RUNTIME_RECOVER_SET(buf)
-#define EXIT_JUMP(buf) RUNTIME_RECOVER_JUMP(buf)
-#else
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
@@ -30,7 +23,6 @@
 #endif
 #define EXIT_SET(buf) setjmp(buf)
 #define EXIT_JUMP(buf) longjmp(buf,1)
-#endif
 
 #ifndef PROT_READ
 #define PROT_READ 1
@@ -79,10 +71,7 @@ __attribute__((constructor)) static void reserve_tcb_key(void) {
 #endif
 
 static void set_tls_base(void *base) {
-#ifdef _WIN32
-    runtime_win_set_tcb(base);
-    __asm__ __volatile__("wrfsbase %0" : : "r"(base));
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     void *check=NULL;
     if (tcb_key_reserved && !pthread_setspecific(TCB_KEY,base))
         __asm__ __volatile__("movq %%gs:%c1, %0" : "=r"(check) : "i"(TCB_KEY*8));
@@ -92,7 +81,7 @@ static void set_tls_base(void *base) {
 #endif
 }
 
-/* Build TCB/static TLS for the calling host thread and point GS (Linux) or FS/TEB (Windows) at it. */
+/* Build TCB/static TLS for the calling host thread and point GS at it (Linux) or store it in the GS TSD slot (macOS). */
 static void attach(GuestThread *t) {
     uint64_t offset=tls_offset();
     size_t total=offset+256;
@@ -109,12 +98,6 @@ static void attach(GuestThread *t) {
     tcb[2]=(uint64_t)(uintptr_t)t;           /* tcb_thread */
     t->tls_block=block; t->tcb=tcb;
     set_tls_base(tcb);
-#ifdef _WIN32
-    if (!t->win32_handle) {
-        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &t->win32_handle, 0, FALSE, DUPLICATE_SAME_ACCESS);
-        t->win32_tid = GetCurrentThreadId();
-    }
-#endif
     current=t;
 }
 
@@ -136,11 +119,7 @@ GuestThread *runtime_thread_current(void) {
     if (current) return current;
     GuestThread *t=new_thread();
     if (!t) { fputs("Cannot allocate guest thread\n",stderr); exit(1); }
-#ifdef _WIN32
-    t->host=GetCurrentThread();
-#else
     t->host=pthread_self();
-#endif
     t->host_owned=1;
     snprintf(t->name,sizeof(t->name),"host");
     attach(t); publish(t);
@@ -153,19 +132,6 @@ void runtime_thread_attach_host(const char *name) {
 }
 
 void runtime_thread_attach_main(void) {
-#ifdef _WIN32
-    static int s_process_prio_configured = 0;
-    if (!s_process_prio_configured) {
-        s_process_prio_configured = 1;
-        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
-        PROCESS_POWER_THROTTLING_STATE throttling = {0};
-        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-        throttling.StateMask = 0;
-        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    }
-#endif
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
 }
@@ -286,72 +252,18 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
 static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
-#ifdef _WIN32
-    runtime_win_set_thread_name(host);
-#else
 #ifdef __APPLE__
     pthread_setname_np(host);
 #else
     pthread_setname_np(pthread_self(),host);
 #endif
-#endif
 }
 
-#ifdef _WIN32
-static int get_host_cores(void) {
-    static int s_cores = 0;
-    if (!s_cores) {
-        SYSTEM_INFO si;
-        GetSystemInfo(&si);
-        s_cores = (int)si.dwNumberOfProcessors;
-        if (s_cores < 1) s_cores = 1;
-    }
-    return s_cores;
-}
-
-static int ps4_prio_to_win32(int prio, const char *name) {
-    int cores = get_host_cores();
-    int is_audio = (name && (strstr(name, "Audio") || strstr(name, "audio") || strstr(name, "Sound") || strstr(name, "sound") || strstr(name, "pad")));
-    int is_render = (name && (strstr(name, "Render") || strstr(name, "render") || strstr(name, "Present") || strstr(name, "Flip") || strstr(name, "Display")));
-    int is_main = (name && (strstr(name, "Main") || strstr(name, "main") || strstr(name, "host")));
-    int is_worker = (name && (strstr(name, "Worker") || strstr(name, "worker") || strstr(name, "Pool") || strstr(name, "pool") || strstr(name, "Work") || strstr(name, "work") || strstr(name, "Havok") || strstr(name, "Cloth") || strstr(name, "Job") || strstr(name, "job")));
-
-    /* Audio threads get elevated priority to prevent audio dropouts */
-    if (is_audio || prio <= 180) {
-        return THREAD_PRIORITY_ABOVE_NORMAL;
-    }
-
-    /* Rendering and main display threads are on the critical display/GPU submission path */
-    if (is_render || is_main) {
-        return THREAD_PRIORITY_ABOVE_NORMAL;
-    }
-
-    /* On 4 cores or fewer (no SMT / low core count), worker pools must NOT preempt main or render threads */
-    if (cores <= 4) {
-        if (is_worker) return THREAD_PRIORITY_BELOW_NORMAL;
-        if (prio <= 260) return THREAD_PRIORITY_BELOW_NORMAL;
-        if (prio <= 700) return THREAD_PRIORITY_BELOW_NORMAL;
-        return THREAD_PRIORITY_LOWEST;
-    }
-
-    /* Higher core systems (6C/12T+) */
-    if (is_worker) return THREAD_PRIORITY_BELOW_NORMAL;
-    if (prio <= 260) return THREAD_PRIORITY_ABOVE_NORMAL;
-    if (prio <= 400) return THREAD_PRIORITY_NORMAL;
-    if (prio <= 700) return THREAD_PRIORITY_BELOW_NORMAL;
-    return THREAD_PRIORITY_LOWEST;
-}
-#endif
 
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
-#ifdef _WIN32
-    if (t->attr.prio > 0) {
-        SetThreadPriority(GetCurrentThread(), ps4_prio_to_win32(t->attr.prio, t->name));
-    }
-#endif
     if (!EXIT_SET(t->exit_jump)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     host_lock(&lock); t->finished=1; ++exited; host_unlock(&lock);
@@ -372,9 +284,6 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     publish(t);
     CHECK_LOW_ADDR(t);
     *out=t;
-#ifdef _WIN32
-    int e=host_thread_start(&t->host,stack_bytes,host_start,t);
-#else
     pthread_attr_t host;
     pthread_attr_init(&host);
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
@@ -386,7 +295,6 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     }
     int e=pthread_create(&t->host,&host,host_start,t);
     pthread_attr_destroy(&host);
-#endif
     if (e) {
         fprintf(stderr,"STOP: host thread creation failed: %d\n",e);
         return ERR(35);
@@ -441,11 +349,6 @@ static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
 static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
     if (!find_thread(t)) return ERR(3);
     t->attr.prio=prio;
-#ifdef _WIN32
-    if (t->win32_handle) {
-        SetThreadPriority(t->win32_handle, ps4_prio_to_win32(prio, t->name));
-    }
-#endif
     return 0;
 }
 
@@ -463,11 +366,6 @@ static ABI int32_t thread_rename(GuestThread *t,const char *name) {
     if (!name) return ERR(22);
     snprintf(t->name,sizeof(t->name),"%s",name);
     if (t==current) set_host_name(t->name);
-#ifdef _WIN32
-    if (t->win32_handle && t->attr.prio > 0) {
-        SetThreadPriority(t->win32_handle, ps4_prio_to_win32(t->attr.prio, t->name));
-    }
-#endif
     return 0;
 }
 static ABI int32_t thread_equal(GuestThread *a,GuestThread *b) { return a==b; }
@@ -529,13 +427,9 @@ void runtime_thread_set_blocked(const char *what, uint64_t resource) {
     if (t) {
         t->blocked_on = what;
         t->blocked_resource = resource;
-#ifdef _WIN32
-        t->blocked_tick = GetTickCount64();
-#else
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         t->blocked_tick = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
     }
 }
 

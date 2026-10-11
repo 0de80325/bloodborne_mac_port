@@ -1,6 +1,5 @@
 /* Opaque PS4 mutex and condition variable handles over the host's own primitives: pthread
- * mutexes/condition variables on Linux; on Windows an SRW lock with owner and depth (the PS4
- * error-checking, recursive and normal types) and a condition variable. */
+ * mutexes/condition variables. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
@@ -11,75 +10,6 @@
 
 enum { TYPE_ERRORCHECK = 1, TYPE_RECURSIVE = 2, TYPE_NORMAL = 3 }; /* 4: adaptive, error-checking here */
 
-#ifdef _WIN32
-typedef struct { SRWLOCK lock; DWORD owner; unsigned depth; int type; } NativeMutex;
-typedef CONDITION_VARIABLE NativeCond;
-static int native_init(NativeMutex *m, int type) {
-    InitializeSRWLock(&m->lock); m->owner = 0; m->depth = 0; m->type = type; return 0;
-}
-static int native_destroy(NativeMutex *m) { return __atomic_load_n(&m->owner, __ATOMIC_RELAXED) ? EBUSY : 0; }
-static DWORD owner(const NativeMutex *m) { return __atomic_load_n(&m->owner, __ATOMIC_RELAXED); }
-static void take(NativeMutex *m, DWORD self) { __atomic_store_n(&m->owner, self, __ATOMIC_RELAXED); m->depth = 1; }
-/* Relocking by the owner: recursion, an error, or (normal type) a deadlock as on POSIX. */
-static int relock(NativeMutex *m) {
-    if (m->type == TYPE_RECURSIVE) return m->depth == ~0u ? EAGAIN : (++m->depth, 0);
-    return m->type == TYPE_NORMAL ? -1 : EDEADLK;
-}
-static int native_lock(NativeMutex *m) {
-    DWORD self = GetCurrentThreadId();
-    if (owner(m) == self) { int e = relock(m); if (e >= 0) return e; }
-    AcquireSRWLockExclusive(&m->lock);
-    take(m, self);
-    return 0;
-}
-static int native_trylock(NativeMutex *m) {
-    DWORD self = GetCurrentThreadId();
-    if (owner(m) == self) return m->type == TYPE_RECURSIVE ? relock(m) : EBUSY;
-    if (!TryAcquireSRWLockExclusive(&m->lock)) return EBUSY;
-    take(m, self);
-    return 0;
-}
-/* SRW locks have no timed acquire: retry until the realtime deadline (uncontended in practice). */
-static int native_timedlock(NativeMutex *m, uint64_t deadline) {
-    DWORD self = GetCurrentThreadId();
-    if (owner(m) == self) { int e = relock(m); if (e >= 0) return e; }
-    for (unsigned attempt = 0;; ++attempt) {
-        if (TryAcquireSRWLockExclusive(&m->lock)) { take(m, self); return 0; }
-        if (host_realtime_ns() >= deadline) return ETIMEDOUT;
-        if (attempt < 64) YieldProcessor(); else if (attempt < 128) SwitchToThread(); else Sleep(1);
-    }
-}
-static int native_unlock(NativeMutex *m) {
-    DWORD self = GetCurrentThreadId(), held = owner(m);
-    /* A normal mutex may be unlocked by another thread (glibc does not check its owner). */
-    if (held != self && (m->type != TYPE_NORMAL || !held)) return EPERM;
-    if (held == self && --m->depth) return 0;
-    __atomic_store_n(&m->owner, 0, __ATOMIC_RELAXED); m->depth = 0;
-    ReleaseSRWLockExclusive(&m->lock);
-    return 0;
-}
-static int native_cond_init(NativeCond *c) { InitializeConditionVariable(c); return 0; }
-static int native_cond_destroy(NativeCond *c) { (void)c; return 0; }
-/* deadline: realtime nanoseconds, 0 for none. The wait gives up the whole recursion. */
-static int native_cond_wait(NativeCond *c, NativeMutex *m, uint64_t deadline) {
-    DWORD self = GetCurrentThreadId(), ms = INFINITE;
-    if (owner(m) != self) return EPERM;
-    if (deadline) {
-        uint64_t now = host_realtime_ns();
-        if (now >= deadline) return ETIMEDOUT;
-        uint64_t left = (deadline - now + 999999) / 1000000;
-        ms = left >= INFINITE ? INFINITE - 1 : (DWORD)left;
-    }
-    unsigned depth = m->depth;
-    __atomic_store_n(&m->owner, 0, __ATOMIC_RELAXED); m->depth = 0;
-    BOOL woken = SleepConditionVariableSRW(c, &m->lock, ms, 0);
-    DWORD error = woken ? 0 : GetLastError();
-    __atomic_store_n(&m->owner, self, __ATOMIC_RELAXED); m->depth = depth;
-    return woken ? 0 : error == ERROR_TIMEOUT ? ETIMEDOUT : EINVAL;
-}
-static int native_cond_signal(NativeCond *c) { WakeConditionVariable(c); return 0; }
-static int native_cond_broadcast(NativeCond *c) { WakeAllConditionVariable(c); return 0; }
-#else
 #include <pthread.h>
 typedef pthread_mutex_t NativeMutex;
 typedef pthread_cond_t NativeCond;
@@ -123,7 +53,6 @@ static int native_cond_wait(NativeCond *c, NativeMutex *m, uint64_t deadline) {
 }
 static int native_cond_signal(NativeCond *c) { return pthread_cond_signal(c); }
 static int native_cond_broadcast(NativeCond *c) { return pthread_cond_broadcast(c); }
-#endif
 
 typedef struct { int type; } GuestAttr;
 typedef struct { NativeMutex native; } GuestMutex;
@@ -196,7 +125,6 @@ static ABI int32_t mutex_lock(GuestMutex **mutex) {
     e = orbis_error(native_lock(&(*mutex)->native));
     runtime_thread_clear_blocked();
     if (!e) ++locks;
-    restore_guest_fs();
     return e;
 }
 static ABI int32_t mutex_trylock(GuestMutex **mutex) {
@@ -204,7 +132,6 @@ static ABI int32_t mutex_trylock(GuestMutex **mutex) {
     if (e) return e;
     e = orbis_error(native_trylock(&(*mutex)->native));
     if (!e) ++locks;
-    restore_guest_fs();
     return e;
 }
 static ABI int32_t mutex_unlock(GuestMutex **mutex) {
@@ -212,7 +139,6 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     if ((uintptr_t)*mutex < 2) return orbis_error(EPERM);
     int32_t e = orbis_error(native_unlock(&(*mutex)->native));
     if (!e) ++unlocks;
-    restore_guest_fs();
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
@@ -231,7 +157,6 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
     e = timed_error(native_timedlock(&(*mutex)->native, deadline_after(usec)));
     runtime_thread_clear_blocked();
     if (!e) ++locks;
-    restore_guest_fs();
     return e;
 }
 typedef struct { NativeCond native; } GuestCond;
@@ -274,7 +199,6 @@ static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     runtime_thread_set_blocked("condvar", (uintptr_t)cond);
     int32_t res = orbis_error(native_cond_wait(&(*cond)->native, &(*mutex)->native, 0));
     runtime_thread_clear_blocked();
-    restore_guest_fs();
     return res;
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, uint64_t deadline) {
@@ -285,7 +209,6 @@ static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, uint64_t de
     runtime_thread_set_blocked("condvar_timed", (uintptr_t)cond);
     int32_t res = timed_error(native_cond_wait(&(*cond)->native, &(*mutex)->native, deadline ? deadline : 1));
     runtime_thread_clear_blocked();
-    restore_guest_fs();
     return res;
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
@@ -366,28 +289,7 @@ void runtime_mutex_dump_info(void *f_ptr, void *handle) {
     if (!handle || !f) return;
     GuestMutex **mptr = (GuestMutex **)handle;
     GuestMutex *m = NULL;
-#ifdef _WIN32
-    if (!IsBadReadPtr(mptr, sizeof(void *))) {
-        m = *mptr;
-    } else {
-        m = (GuestMutex *)handle;
-    }
-    if (!m || (uintptr_t)m < 3 || IsBadReadPtr(m, sizeof(GuestMutex))) return;
-    const char *owner_name = "none";
-    DWORD owner_tid = m->native.owner;
-    if (owner_tid) {
-        for (GuestThread *t = runtime_thread_get_all(); t; t = t->next) {
-            if (t->win32_tid == owner_tid) {
-                owner_name = t->name;
-                break;
-            }
-        }
-    }
-    fprintf(f, "    [mutex %p: depth=%u, owner='%s' (tid=%lu)]\n",
-            (void *)m, m->native.depth, owner_name, (unsigned long)owner_tid);
-#else
     if (mptr) m = *mptr; else m = (GuestMutex *)handle;
     if (!m || (uintptr_t)m < 3) return;
     fprintf(f, "    [mutex %p]\n", (void *)m);
-#endif
 }

@@ -1,6 +1,7 @@
 # macOS Port Plan (Apple Silicon)
 
-Status: **work in progress — does not run yet.**
+Status: **work in progress — boots on MoltenVK; character creation and the first level are
+playable (2026-10-11).**
 
 ## Approach
 

@@ -110,6 +110,30 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+
+// bbport: an invalid packet in a command buffer. Shows the packet as the guest mapping and the
+// backing store hold it, now and 50 ms later: a difference between the views points at memory
+// aliasing, a later change at a buffer read before the guest finished writing it.
+static void DumpBadPacket(const u32* packet, uintptr_t base, size_t remaining) {
+    const auto at = reinterpret_cast<uintptr_t>(packet);
+    std::fprintf(stderr, "Bad PM4 packet at %#lx (offset %#lx in command buffer, %zu bytes left)\n",
+                 static_cast<unsigned long>(at), static_cast<unsigned long>(at - base), remaining);
+    const size_t words = std::min<size_t>(8, remaining / 4);
+    for (int pass = 0; pass < 2; ++pass) {
+        u32 backing[8]{};
+        const bool have = runtime_memory_read_backing(at, backing, words * 4) != 0;
+        std::fprintf(stderr, "  %s guest:  ", pass ? "+50ms" : "now  ");
+        for (size_t i = 0; i < words; ++i) std::fprintf(stderr, "%08x ", packet[i]);
+        std::fprintf(stderr, "\n  %s backing:", pass ? "+50ms" : "now  ");
+        for (size_t i = 0; i < words; ++i) {
+            if (have) std::fprintf(stderr, "%08x%c", backing[i], backing[i] != packet[i] ? '*' : ' ');
+        }
+        std::fprintf(stderr, have ? "\n" : "(none)\n");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -766,6 +790,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
             break;
         case 0:
+            DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
             UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
                             header->type0.base.Value(), header->type0.NumWords());
             break;

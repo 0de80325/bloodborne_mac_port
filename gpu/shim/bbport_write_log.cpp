@@ -6,12 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#elif defined(__APPLE__)
+#ifdef __APPLE__
 #include <sys/ucontext.h>
 #include "bbport_threads.h"
 #else
@@ -66,11 +61,7 @@ void Note(std::uint64_t address, const void* data, std::uint64_t size, Source so
 }
 
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
-#ifdef _WIN32
-    static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(GetCurrentThreadId());
-#else
     static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
-#endif
     Entry e{address, size, 0, __rdtsc(), source, tid};
     std::memcpy(&e.first, data, size < 8 ? size : 8);
     Push(ring, head, e);
@@ -98,11 +89,7 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     if (Mode() == 0 || !ucontext) {
         return;
     }
-#ifdef _WIN32
-    const auto* ctx = static_cast<const CONTEXT*>(ucontext);
-    const std::uint64_t regs[] = {ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx,
-                                  ctx->Rsi, ctx->Rdi, ctx->R14, ctx->R15};
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     const auto& ss = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
     const std::uint64_t regs[] = {ss.__rax, ss.__rbx, ss.__rcx, ss.__rdx,
                                   ss.__rsi, ss.__rdi, ss.__r14, ss.__r15};

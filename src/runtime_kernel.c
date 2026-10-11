@@ -2,7 +2,6 @@
  * pthread once/keys, signal bookkeeping and a narrow sysctl. Guest values
  * use FreeBSD numbering; host errno values never reach the guest directly. */
 #define _GNU_SOURCE
-#define _CRT_RAND_S
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,14 +11,10 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <x86intrin.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <pthread.h>
 #include <sched.h>
 #include <sys/random.h>
 #include <sys/resource.h>
-#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #define CLOCK_REALTIME_COARSE CLOCK_REALTIME
@@ -53,22 +48,16 @@ static int32_t fail_posix(int e) { *runtime_errno()=runtime_guest_errno(e); retu
 static uint64_t process_start;
 __attribute__((constructor)) static void remember_start(void) { process_start=host_monotonic_ns(); }
 
-#ifdef _WIN32
-typedef enum { REALTIME, MONOTONIC, THREAD_CPU, PROCESS_CPU } HostClock;
-#define HOST_CLOCK(linux_id, windows_id) windows_id
-#else
 typedef clockid_t HostClock;
-#define HOST_CLOCK(linux_id, windows_id) linux_id
-#endif
 
 static int host_clock(uint32_t id,HostClock *out) {
     switch (id) {
-    case 0: case 9: case 10: *out=HOST_CLOCK(CLOCK_REALTIME,REALTIME); return 1;  /* REALTIME(_PRECISE/_FAST) */
-    case 4: case 11: case 12: case 5: case 7: case 8: *out=HOST_CLOCK(CLOCK_MONOTONIC,MONOTONIC); return 1; /* MONOTONIC/UPTIME */
-    case 13: *out=HOST_CLOCK(CLOCK_REALTIME_COARSE,REALTIME); return 1;          /* SECOND */
-    case 14: *out=HOST_CLOCK(CLOCK_THREAD_CPUTIME_ID,THREAD_CPU); return 1;
-    case 2: case 15: *out=HOST_CLOCK(CLOCK_PROCESS_CPUTIME_ID,PROCESS_CPU); return 1; /* PROF/PROCTIME */
-    case 16: case 17: case 18: case 19: *out=HOST_CLOCK(CLOCK_MONOTONIC,MONOTONIC); return 1; /* PS4 network clocks */
+    case 0: case 9: case 10: *out=CLOCK_REALTIME; return 1;  /* REALTIME(_PRECISE/_FAST) */
+    case 4: case 11: case 12: case 5: case 7: case 8: *out=CLOCK_MONOTONIC; return 1; /* MONOTONIC/UPTIME */
+    case 13: *out=CLOCK_REALTIME_COARSE; return 1;          /* SECOND */
+    case 14: *out=CLOCK_THREAD_CPUTIME_ID; return 1;
+    case 2: case 15: *out=CLOCK_PROCESS_CPUTIME_ID; return 1; /* PROF/PROCTIME */
+    case 16: case 17: case 18: case 19: *out=CLOCK_MONOTONIC; return 1; /* PS4 network clocks */
     default: return 0;
     }
 }
@@ -76,19 +65,10 @@ static int host_clock(uint32_t id,HostClock *out) {
 static int clock_read(uint32_t id,GuestTimespec *ts) {
     HostClock host;
     if (!ts || !host_clock(id,&host)) return EINVAL;
-#ifdef _WIN32
-    uint64_t ns;
-    if (host==REALTIME) ns=host_realtime_ns();
-    else if (host==MONOTONIC) ns=host_monotonic_ns();
-    else { int64_t user,system; runtime_cpu_times(host==THREAD_CPU,&user,&system); ns=(uint64_t)(user+system)*1000; }
-    ts->sec=(int64_t)(ns/1000000000); ts->nsec=id==13 ? 0 : (int64_t)(ns%1000000000);
-    return 0;
-#else
     struct timespec t;
     if (clock_gettime(host,&t)) return errno;
     if (id==13) t.tv_nsec=0;
     ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; return 0;
-#endif
 }
 
 static ABI int32_t kernel_clock_gettime(uint32_t id,GuestTimespec *ts) {
@@ -100,13 +80,9 @@ static ABI int32_t posix_clock_gettime(uint32_t id,GuestTimespec *ts) {
 static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
     HostClock host;
     if (!host_clock(id,&host)) return fail_posix(EINVAL);
-#ifdef _WIN32
-    if (ts) { ts->sec=0; ts->nsec=100; } /* FILETIME and QPC units */
-#else
     struct timespec t;
     if (clock_getres(host,&t)) return fail_posix(errno);
     if (ts) { ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; }
-#endif
     return 0;
 }
 
@@ -145,12 +121,8 @@ static ABI int32_t posix_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) {
 typedef struct { int32_t minuteswest, dsttime; } GuestTimezone;
 static ABI int32_t kernel_gettimezone(GuestTimezone *tz) {
     if (!tz) return ERR(22);
-#ifdef _WIN32
-    tz->minuteswest=(int32_t)(-runtime_utc_offset(time(NULL))/60); tz->dsttime=0;
-#else
     time_t now=time(NULL); struct tm local; localtime_r(&now,&local);
     tz->minuteswest=(int32_t)(-local.tm_gmtoff/60); tz->dsttime=0;
-#endif
     return 0;
 }
 static ABI int32_t posix_gettimeofday(GuestTimeval *tv,GuestTimezone *tz) {
@@ -190,12 +162,6 @@ typedef struct { GuestTimeval utime, stime; int64_t rest[14]; } GuestRusage;
 static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     if (!out || (who!=0 && who!=1)) return fail_posix(EINVAL);
     memset(out,0,sizeof(*out));
-#ifdef _WIN32
-    int64_t user,system;
-    runtime_cpu_times(who==1,&user,&system);
-    out->utime=(GuestTimeval){user/1000000,user%1000000};
-    out->stime=(GuestTimeval){system/1000000,system%1000000};
-#else
 #ifdef __APPLE__
     if (who==1) { /* no RUSAGE_THREAD: ask Mach for this thread's times */
         thread_basic_info_data_t info; mach_msg_type_number_t count=THREAD_BASIC_INFO_COUNT;
@@ -213,7 +179,6 @@ static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
 #endif
     out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
     out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
-#endif
     return 0;
 }
 
@@ -223,14 +188,8 @@ static int32_t get_host_ncpu(void) {
         int v = atoi(env);
         if (v > 0) return (int32_t)v;
     }
-#ifdef _WIN32
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return si.dwNumberOfProcessors > 0 ? (int32_t)si.dwNumberOfProcessors : 4;
-#else
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int32_t)n : 4;
-#endif
 }
 
 static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,uint64_t *oldlen,const void *new_value,uint64_t newlen) {
@@ -238,9 +197,7 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
     if (!name || namelen<2 || new_value) return fail_posix(EINVAL);
     if (name[0]==1 && name[1]==37) { /* kern.arandom */
         if (!old || !oldlen) return fail_posix(EINVAL);
-#ifdef _WIN32
-        if (runtime_random(old,(size_t)*oldlen)<0) return fail_posix(errno);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
         arc4random_buf(old,(size_t)*oldlen);
 #else
         if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);

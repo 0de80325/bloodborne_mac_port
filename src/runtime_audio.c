@@ -13,10 +13,6 @@
 #include <string.h>
 #include <time.h>
 #include <SDL3/SDL.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <mmsystem.h>
-#endif
 
 #define PORTS 25
 #define ERR_NOT_OPENED ((int32_t)0x80260001)
@@ -97,9 +93,6 @@ static ABI int32_t audio_init(void) {
     host_lock(&table_lock);
     int32_t r=initialized ? ERR_ALREADY_INIT : 0;
     if (!initialized) {
-#ifdef _WIN32
-        timeBeginPeriod(1);
-#endif
     }
     initialized=1;
     host_unlock(&table_lock);
@@ -181,14 +174,6 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
     Port *p=port_of(handle,&error);
     host_unlock(&table_lock);
     if (!p) return error;
-#ifdef _WIN32
-    static _Thread_local int s_audio_prio_set=0;
-    if (!s_audio_prio_set) {
-        /* Use THREAD_PRIORITY_HIGHEST: avoids starvation of Haswell 4C/4T CPU while maintaining low latency */
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-        s_audio_prio_set=1;
-    }
-#endif
     host_lock(&p->lock);
     size_t samples=(size_t)p->frames*(size_t)p->channels, bytes=samples*(size_t)p->sample_bytes;
     uint64_t period=(uint64_t)p->frames*1000000000u/48000u;

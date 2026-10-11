@@ -14,14 +14,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <windows.h>
-#include <direct.h>
-#include <io.h>
-#define ftruncate(fd, size) _chsize_s(fd, size)
-#else
 #include <ftw.h>
-#endif
 
 #define ERR_PARAMETER ((int32_t)0x809F0000)
 #define ERR_NOT_INITIALIZED ((int32_t)0x809F0001)
@@ -118,18 +111,10 @@ static int make_dirs(const char *path) {
     for (char *p=buf+1;*p;++p) if (*p=='/' || *p=='\\') {
         char old = *p;
         *p=0;
-#ifdef _WIN32
-        runtime_win_mkdir(buf, 0777);
-#else
         mkdir(buf,0777);
-#endif
         *p=old;
     }
-#ifdef _WIN32
-    return (runtime_win_mkdir(buf, 0777) && errno!=EEXIST) ? -1 : 0;
-#else
     return (mkdir(buf,0777) && errno!=EEXIST) ? -1 : 0;
-#endif
 }
 
 static void root(int32_t user, const char *title, char *out, size_t size) {
@@ -164,11 +149,9 @@ static int read_param(const char *meta, Param *p) {
     return n==1 ? 0 : -1;
 }
 
-#ifndef _WIN32
 static int remove_entry(const char *path, const struct stat *st, int flag, struct FTW *ftw) {
     (void)st; (void)flag; (void)ftw; return remove(path);
 }
-#endif
 
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
@@ -290,13 +273,8 @@ static ABI int32_t save_delete(const Delete *d) {
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
     struct stat st;
     if (stat(host,&st)) return ERR_NOT_FOUND;
-#ifdef _WIN32
-    runtime_win_remove_tree(host);
-    runtime_win_remove_tree(meta);
-#else
     nftw(host,remove_entry,16,FTW_DEPTH|FTW_PHYS);
     nftw(meta,remove_entry,16,FTW_DEPTH|FTW_PHYS);
-#endif
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }

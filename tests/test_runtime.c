@@ -4,8 +4,6 @@
 
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
-/* probe.c: reloads the guest FS base after host calls (Windows only; a no-op elsewhere). */
-ABI void restore_guest_fs(void) {}
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

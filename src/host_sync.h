@@ -1,75 +1,11 @@
 /* The runtime's own locks, condition variables, threads and clocks.
- * Linux: pthreads and clock_gettime. macOS: the same pthreads path (see __APPLE__ below).
- * Windows: native SRWLOCK, CONDITION_VARIABLE, CRT threads, QueryPerformanceCounter. */
+ * Linux: pthreads and clock_gettime. macOS: the same pthreads path (see __APPLE__ below). */
 #ifndef BB_HOST_SYNC_H
 #define BB_HOST_SYNC_H
 #include <stdint.h>
 #include <stddef.h>
 #include <errno.h>
 #include <time.h>
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
-typedef SRWLOCK HostMutex;
-#define HOST_MUTEX_INIT SRWLOCK_INIT
-static inline void host_mutex_init(HostMutex *m) { InitializeSRWLock(m); }
-static inline void host_lock(HostMutex *m) { AcquireSRWLockExclusive(m); }
-static inline int host_trylock(HostMutex *m) { return TryAcquireSRWLockExclusive(m) != 0; }
-static inline void host_unlock(HostMutex *m) { ReleaseSRWLockExclusive(m); }
-static inline void host_mutex_lock(HostMutex *m) { host_lock(m); }
-static inline void host_mutex_unlock(HostMutex *m) { host_unlock(m); }
-
-/* SRW locks are not recursive: the owner and depth make this one so. */
-typedef struct { SRWLOCK lock; DWORD owner; unsigned depth; } HostRecursiveMutex;
-#define HOST_RECURSIVE_MUTEX_INIT {SRWLOCK_INIT, 0, 0}
-static inline void host_recursive_lock(HostRecursiveMutex *m) {
-    DWORD self = GetCurrentThreadId();
-    if (__atomic_load_n(&m->owner, __ATOMIC_RELAXED) == self) { ++m->depth; return; }
-    AcquireSRWLockExclusive(&m->lock);
-    __atomic_store_n(&m->owner, self, __ATOMIC_RELAXED);
-    m->depth = 1;
-}
-static inline void host_recursive_unlock(HostRecursiveMutex *m) {
-    if (--m->depth) return;
-    __atomic_store_n(&m->owner, 0, __ATOMIC_RELAXED);
-    ReleaseSRWLockExclusive(&m->lock);
-}
-
-typedef SRWLOCK HostRwlock;
-#define HOST_RWLOCK_INIT SRWLOCK_INIT
-static inline void host_rwlock_init(HostRwlock *l) { InitializeSRWLock(l); }
-static inline void host_read_lock(HostRwlock *l) { AcquireSRWLockShared(l); }
-static inline int host_try_read_lock(HostRwlock *l) { return TryAcquireSRWLockShared(l) != 0; }
-static inline void host_read_unlock(HostRwlock *l) { ReleaseSRWLockShared(l); }
-static inline void host_write_lock(HostRwlock *l) { AcquireSRWLockExclusive(l); }
-static inline int host_try_write_lock(HostRwlock *l) { return TryAcquireSRWLockExclusive(l) != 0; }
-static inline void host_write_unlock(HostRwlock *l) { ReleaseSRWLockExclusive(l); }
-
-typedef CONDITION_VARIABLE HostCond;
-#define HOST_COND_INIT CONDITION_VARIABLE_INIT
-static inline void host_cond_init(HostCond *c) { InitializeConditionVariable(c); }
-static inline void host_cond_wait(HostCond *c, HostMutex *m) { SleepConditionVariableSRW(c, m, INFINITE, 0); }
-/* 0 when woken, ETIMEDOUT once at least ns passed. */
-static inline int host_cond_timedwait(HostCond *c, HostMutex *m, uint64_t ns) {
-    uint64_t ms = (ns + 999999) / 1000000;
-    if (SleepConditionVariableSRW(c, m, ms >= INFINITE ? INFINITE - 1 : (DWORD)ms, 0)) return 0;
-    return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT : EINVAL;
-}
-static inline void host_cond_signal(HostCond *c) { WakeConditionVariable(c); }
-static inline void host_cond_broadcast(HostCond *c) { WakeAllConditionVariable(c); }
-
-typedef uint64_t HostThreadId;
-static inline HostThreadId host_thread_id(void) { return GetCurrentThreadId(); }
-static inline int host_thread_equal(HostThreadId a, HostThreadId b) { return a == b; }
-static inline void host_yield(void) { if (!SwitchToThread()) Sleep(0); }
-typedef HANDLE HostThread;
-#else
 #include <pthread.h>
 #include <sched.h>
 #ifdef __APPLE__
@@ -123,7 +59,6 @@ static inline HostThreadId host_thread_id(void) { return pthread_self(); }
 static inline int host_thread_equal(HostThreadId a, HostThreadId b) { return pthread_equal(a, b); }
 static inline void host_yield(void) { sched_yield(); }
 typedef pthread_t HostThread;
-#endif
 
 /* Runtime helper threads. */
 int host_thread_start(HostThread *thread, size_t stack, void *(*entry)(void *), void *argument);

@@ -7,6 +7,14 @@
 
 #include <atomic>
 
+/// Keyboard shortcut that opens the in-game menu (log lines and the ini header; ASCII).
+/// Mac keyboards have no Insert key, so macOS uses the Settings convention Cmd+,.
+#ifdef __APPLE__
+#define BBPORT_MENU_KEYS "Cmd+,"
+#else
+#define BBPORT_MENU_KEYS "Insert"
+#endif
+
 namespace BbSettings {
 
 enum Upscaler : int { UpscalerOff = 0, UpscalerFsr3 = 1, UpscalerFsr4 = 2, UpscalerFsr411 = 3,
@@ -26,16 +34,16 @@ struct Effect {
     bool default_on;
 };
 inline constexpr Effect Effects[] = {
-    {"effect_chromatic_aberration", "Хроматическая аберрация", true},
-    {"effect_dof", "Глубина резкости (DoF)", true},
-    {"effect_motion_blur", "Размытие в движении", true},
-    {"effect_ssao", "Затенение SSAO", true},
-    {"effect_game_aa", "Собственное сглаживание игры", true},
-    {"effect_dynamic_shadows", "Тени от динамических источников", true},
-    {"effect_ssr", "Отражения SSR (не было в игре)", false},
-    {"skip_intro", "Пропуск заставок при запуске", false},
-    {"debug_camera", "Свободная камера (Cross + L3)", false},
-    {"debug_menu", "Debug menu (нужны файлы шрифтов)", false},
+    {"effect_chromatic_aberration", "Chromatic aberration", true},
+    {"effect_dof", "Depth of field (DoF)", true},
+    {"effect_motion_blur", "Motion blur", true},
+    {"effect_ssao", "Ambient occlusion (SSAO)", true},
+    {"effect_game_aa", "Built-in game anti-aliasing", true},
+    {"effect_dynamic_shadows", "Shadows from dynamic lights", true},
+    {"effect_ssr", "Screen-space reflections (not in original)", false},
+    {"skip_intro", "Skip intro videos at launch", false},
+    {"debug_camera", "Free camera (Cross + L3)", false},
+    {"debug_menu", "Debug menu (requires font files)", false},
 };
 inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
 /// Live output resolutions: the upscaler's output and the UI host targets.

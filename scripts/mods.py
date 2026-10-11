@@ -17,7 +17,7 @@ GAME_FOLDERS = {'action', 'chr', 'event', 'facegen', 'font', 'map', 'menu', 'mov
 
 def child(folder, name):
     """`name` inside `folder`, matching an existing entry case-insensitively (mods made on
-    Windows often differ from the game's lower-case names)."""
+    case-insensitive file systems often differ from the game's lower-case names)."""
     folder = Path(folder)
     for entry in (folder.iterdir() if folder.is_dir() else ()):
         if entry.name.casefold() == name.casefold():
@@ -102,20 +102,7 @@ def mod_files(folder):
 
 
 def make_link(link_path, target_path, target_is_directory=False):
-    try:
-        link_path.symlink_to(target_path, target_is_directory=target_is_directory)
-    except OSError:
-        if sys.platform == 'win32':
-            if target_is_directory:
-                import _winapi
-                _winapi.CreateJunction(str(target_path), str(link_path))
-            else:
-                try:
-                    os.link(str(target_path), str(link_path))
-                except OSError:
-                    shutil.copy2(str(target_path), str(link_path))
-        else:
-            raise
+    link_path.symlink_to(target_path, target_is_directory=target_is_directory)
 
 
 def expand(directory):

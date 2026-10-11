@@ -2,25 +2,12 @@
 #define BB_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
-#ifdef _WIN32
-#include "win32_compat.h"
-#endif
 #include "host_sync.h"
 
-#ifdef _WIN32
-/* runtime_setjmp/runtime_longjmp (runtime_host.c): every Win64 callee-saved register, and no
- * SEH unwinding, which cannot pass the guest frames in between (they have no unwind data). */
-typedef struct { _Alignas(16) unsigned char registers[256]; } RuntimeRecoverBuf;
-int runtime_setjmp(RuntimeRecoverBuf *buf) __attribute__((returns_twice));
-__attribute__((noreturn)) void runtime_longjmp(RuntimeRecoverBuf *buf);
-#define RUNTIME_RECOVER_SET(buf) runtime_setjmp(&(buf))
-#define RUNTIME_RECOVER_JUMP(buf) runtime_longjmp(&(buf))
-#else
 #include <setjmp.h>
 typedef sigjmp_buf RuntimeRecoverBuf;
 #define RUNTIME_RECOVER_SET(buf) sigsetjmp(buf, 0)
 #define RUNTIME_RECOVER_JUMP(buf) siglongjmp(buf, 1)
-#endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
 extern __thread RuntimeRecoverBuf *runtime_fault_recover;
 
@@ -61,7 +48,6 @@ void runtime_thread_report(void);
 void runtime_set_main_tls(const void *data, uint64_t filesz, uint64_t memsz, uint64_t align);
 void runtime_thread_attach_main(void);
 void *runtime_thread_get_tcb(void);
-ABI void restore_guest_fs(void);
 int32_t *runtime_errno(void);
 uintptr_t runtime_sema_resolve(const char *name);
 void runtime_sema_report(void);
@@ -117,9 +103,6 @@ void runtime_thread_attach_host(const char *name);
 
 #include <pthread.h>
 #include <setjmp.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 typedef void *(ABI *GuestEntry)(void *);
 typedef struct ThreadAttr {
@@ -137,13 +120,7 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
-#ifdef _WIN32
-    RuntimeRecoverBuf exit_jump;
-    HANDLE win32_handle;
-    DWORD win32_tid;
-#else
     jmp_buf exit_jump;
-#endif
     const char *blocked_on;
     uint64_t blocked_resource;
     uint64_t blocked_tick;

@@ -8,18 +8,6 @@
 #include <algorithm>
 #include <thread>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-struct alignas(16) BbRecoverBuf {
-    unsigned char registers[256];
-};
-extern "C" __thread BbRecoverBuf* runtime_fault_recover;
-extern "C" int runtime_setjmp(BbRecoverBuf* buf) __attribute__((returns_twice));
-#define BB_RECOVER_SET(buf) runtime_setjmp(&(buf))
-#else
 #ifdef __APPLE__
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -31,7 +19,6 @@ extern "C" int runtime_setjmp(BbRecoverBuf* buf) __attribute__((returns_twice));
 typedef sigjmp_buf BbRecoverBuf;
 extern "C" __thread BbRecoverBuf* runtime_fault_recover;
 #define BB_RECOVER_SET(buf) sigsetjmp(buf, 0)
-#endif
 
 #ifdef __APPLE__
 /// macOS has no gettid(): the Mach thread id (unique per thread, small enough for u32 in practice).
@@ -46,19 +33,7 @@ namespace BbThreads {
 
 /// Hardware threads available to the process.
 inline unsigned Available() {
-#ifdef _WIN32
-    DWORD_PTR process_mask = 0;
-    DWORD_PTR system_mask = 0;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) && process_mask != 0) {
-        unsigned count = 0;
-        while (process_mask) {
-            count += (process_mask & 1);
-            process_mask >>= 1;
-        }
-        return std::max(1u, count);
-    }
-    return std::max(1u, std::thread::hardware_concurrency());
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     // No affinity masks on macOS.
     return std::max(1u, std::thread::hardware_concurrency());
 #else
@@ -73,9 +48,7 @@ inline unsigned Available() {
 
 /// The calling thread only runs on otherwise idle cores (falls back to the lowest nice level).
 inline void MakeBackground() {
-#ifdef _WIN32
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     // Background QoS: efficiency cores, lowest priority (the closest match to SCHED_IDLE).
     pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
 #else

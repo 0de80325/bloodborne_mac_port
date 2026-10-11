@@ -72,7 +72,7 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
            PS4 priority scheduler, host threads run at equal priority. */
         if (getenv("BB_TRACE_SEMA")) fprintf(stderr,"Runtime: blocking wait on semaphore %u (need %d, count %d)\n",id,need,s->count);
         Waiter w={.need=need};
-#if defined(_WIN32) || defined(__APPLE__)
+#ifdef __APPLE__
         host_cond_init(&w.event); /* macOS: realtime clock only; waits below are relative */
 #else
         pthread_condattr_t attr;
@@ -87,13 +87,7 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         uint64_t deadline=timeout ? now_ns()+(uint64_t)*timeout*1000 : 0;
         runtime_thread_set_blocked("semaphore", id);
         while (!w.done) {
-#ifdef _WIN32
-            int e=0;
-            if (timeout) {
-                uint64_t now=now_ns();
-                e=now<deadline ? host_cond_timedwait(&w.event,&lock,deadline-now) : ETIMEDOUT;
-            } else host_cond_wait(&w.event,&lock);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
             int e=0;
             if (timeout) {
                 uint64_t now=now_ns(),left=now<deadline ? deadline-now : 0;
@@ -117,13 +111,10 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
             uint64_t now=now_ns();
             *timeout=result ? 0 : (uint32_t)(now>=deadline ? 0 : (deadline-now)/1000);
         }
-#ifndef _WIN32
         host_check(pthread_cond_destroy(&w.event));
-#endif
         if (!--s->active && s->deleted) free(s);
     }
     host_unlock(&lock);
-    restore_guest_fs();
     return result;
 }
 
@@ -146,7 +137,6 @@ static ABI int32_t sem_signal(uint32_t id,int32_t count) {
         }
     }
     host_unlock(&lock);
-    restore_guest_fs();
     return result;
 }
 

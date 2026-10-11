@@ -12,12 +12,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
 #include <arpa/inet.h>
-#endif
 
 #define USER_ID 1
 #define ORBIS_OK 0
@@ -78,11 +73,7 @@ static ABI int32_t system_param(int32_t id,int32_t *value) {
     case 1: *value=language(); break;           /* language (1 = English US, 8 = Russian) */
     case 2: *value=1; break;                    /* date format DD/MM/YYYY */
     case 3: *value=1; break;                    /* 24-hour clock */
-#ifdef _WIN32
-    case 4: { long tz_sec=0; _get_timezone(&tz_sec); *value=-(int32_t)(tz_sec/60); break; }
-#else
     case 4: { time_t now=time(NULL); struct tm t; localtime_r(&now,&t); *value=(int32_t)(t.tm_gmtoff/60); break; }
-#endif
     case 5: *value=0; break;                    /* summer time */
     case 7: *value=0; break;                    /* parental level off */
     case 1000: *value=1; break;                 /* enter button = cross */

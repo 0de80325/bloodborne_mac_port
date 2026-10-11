@@ -1,149 +1,120 @@
-# bloodborne_mac_port: macOS (Apple Silicon) Port of Bloodborne — WIP
+# bloodborne_mac_port: Bloodborne on macOS (Apple Silicon)
 
-> **This repository is a work-in-progress macOS port** of [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port)
-> (itself based on `bbport` by `deadinside28`). It does **not run on macOS yet**. The plan: build the loader,
-> runtime and GPU core as x86-64 and run under Rosetta 2, render through MoltenVK, then add Metal-native
-> features (MetalFX, zero-copy unified memory). See [docs/MACOS_PORT.md](docs/MACOS_PORT.md).
->
-> No game files are included; you must supply your own decrypted dump. The original Windows README follows.
+A **work-in-progress macOS port** of the native Bloodborne PC port. It runs the original PS4
+executable of *Bloodborne* (CUSA03173, version 1.09) on Apple Silicon Macs: the game's own
+x86-64 code executes directly under **Rosetta 2**, PS4 system libraries are replaced by a
+lightweight HLE runtime written in C, and GPU command buffers are translated to Vulkan by a
+**shadPS4-derived video core** running on **MoltenVK**.
 
----
+This is not an emulator and contains no game code: the loader, runtime and GPU core are built
+as one x86-64 macOS process that loads your own copy of the game.
 
-# bloodborne_pc_windows_port: Native Windows Port of Bloodborne
+> **No game files or copyrighted assets are included, and none will ever be distributed.**
+> You must provide your own legally dumped and decrypted copy of Bloodborne (CUSA03173 v1.09).
+> This project is not affiliated with or endorsed by Sony Interactive Entertainment,
+> FromSoftware, or AMD.
 
-`bloodborne_pc_windows_port` is a native 64-bit Windows port of the PlayStation 4 executable of *Bloodborne* (CUSA03173, version 1.09). 
+## Status (2026-10-11)
 
-This project is a Windows adaptation of the original Linux port (`bbport` by `deadinside28`). It replaces the Linux-specific kernel, memory mapping, and POSIX threading implementation with a native Win32 runtime, allowing the game to run directly on Windows with Vulkan.
+**Work in progress.** On an Apple M4 Max the game boots, character creation works and the
+first level is playable. Expect rendering gaps, missing features and crashes.
 
-The game's x86-64 code executes natively on your CPU without general emulation. System library calls are handled by a dedicated lightweight runtime, and GPU commands are translated directly to Vulkan with support for AMD FSR 3.1 and FSR 4 temporal upscaling.
+- Plan, design decisions and porting checklist: [docs/MACOS_PORT.md](docs/MACOS_PORT.md)
+- Known issues and planned refinements: [docs/MACOS_BACKLOG.md](docs/MACOS_BACKLOG.md)
 
-> **No game files or copyrighted assets are included.** You must provide your own decrypted dump of Bloodborne (CUSA03173, version 1.09).
-> This project is not affiliated with Sony Interactive Entertainment, FromSoftware, or AMD.
+## How it works
 
-**Status: Playable on Windows.** The game boots, loads saves, and runs with audio, gamepad support, and state persistence.
-
----
-
-## Windows Port Changes
-
-This repository adapts the original Linux codebase specifically for Windows systems:
-
-- **Win32 Memory & Synchronization**: Replaced Linux `mmap`, `mprotect`, and POSIX primitives with Windows `VirtualAlloc`, `VirtualProtect`, and native Win32 synchronization events (`src/win32_compat.c`, `src/win32_memory.c`, `src/runtime_host.c`).
-- **Graphical Launcher**: Includes `launch_gui.bat` (powered by `launcher.py`), a desktop control panel to configure target frame rates (30, 60, 90, uncap), rendering resolution, FSR upscaling, and all 61 toggleable community patches from `Bloodborne.xml`.
-- **Command Line Launcher**: `run.bat` provides direct scripted startup, automatic patch compilation, and mod staging on Windows.
-- **Vulkan Frame Pacing**: Integrated presenter queue pacing (`BB_FRAMES_AHEAD=2`) to bound GPU run-ahead, stabilizing frametimes and smoothing 0.1% and 1.0% stutter lows.
-- **Texture Barrier Fix**: Fixed dynamic texture streaming race conditions in `tile_manager.cpp`, ensuring item icons in the HUD and loading screens render correctly without static noise.
-- **AT9 Audio Playback**: Bundles LibAtrac9 compilation to decode AT9 game audio natively on Windows.
-- **Windows Build System**: Standalone `build.bat` script that compiles the complete project with MinGW-w64 (GCC), CMake, and Ninja.
-
----
-
-## Technical Highlights
-
-- **Native Execution**: The game eboot is converted offline into a flat memory image; PS4 libc and libSceFios2 functions are linked directly into the binary. No CPU emulation or instruction translation occurs at run time.
-- **High Framerate Support**: Community simulation patches allow running at 60 FPS, 90 FPS, or uncapped with accurate physics and movement speeds.
-- **Synthetic Motion Vectors & Temporal Upscaling**: Because Bloodborne lacks an internal velocity buffer, the port computes camera motion from depth buffers and object motion from previous frame vertex positions. The scene can render at lower internal resolutions (e.g., 720p or 1080p) while FSR 3.1 / 4 upscales to your display resolution, leaving UI elements crisp at native resolution.
-- **Multi-threaded Draw Pipeline**: PS4 command buffers are decoded on one thread while draw calls are bound and recorded on another, preventing CPU bottlenecks.
-- **In-Game Overlay**: Press `Insert` or `L3 + R3` on your controller to open the real-time configuration menu for resolution, sharpness, and graphics toggles.
-
----
+- **Native execution under Rosetta 2.** The eboot is converted offline into a flat memory
+  image; PS4 libc and libSceFios2 functions are linked directly into it. There is no CPU
+  emulation layer of our own — Rosetta 2 translates the x86-64 code (game + runtime) once.
+  The build targets `x86_64-apple-macos` with deployment target 15.0 (Rosetta AVX2 support).
+- **HLE runtime** (`src/`): kernel, memory, threads, audio, input (SDL3), save data and other
+  PS4 libraries. macOS specifics: guest TLS via a reserved pthread TSD slot, guest-visible
+  memory kept below 1 TiB, Mach-based thread inspection.
+- **GPU** (`gpu/`): the shadPS4 video core and shader recompiler, built as
+  `libbbgpu.dylib`, rendering through MoltenVK (Vulkan on Metal).
+- **Planned:** Metal features from inside the Vulkan renderer (MetalFX upscaling, zero-copy
+  guest memory on unified memory), and native Metal only where profiling shows MoltenVK
+  overhead is the bottleneck.
+- Inherited from upstream: high-frame-rate community patches, synthetic motion vectors and
+  temporal upscaling (FSR 3.1), a two-stage multi-threaded draw pipeline, and an in-game
+  settings overlay (`Insert` or `L3 + R3`).
 
 ## Requirements
 
-- **Operating System**: Windows 10 or Windows 11 (64-bit).
-- **Graphics Card**: A Vulkan 1.3 capable GPU with current vendor drivers:
-  - NVIDIA GeForce GTX 10-series or newer.
-  - AMD Radeon RX 400-series or newer.
-  - Intel Arc A-series or newer.
-- **Processor**: x86-64 processor with AVX2 support.
-- **Python**: Python 3.10 or newer (needed for the patch compiler and launcher).
-- **Game Files**: Decrypted `CUSA03173` directory containing `eboot.bin` (version 1.09).
+- A Mac with **Apple Silicon** running **macOS 15 or newer**
+- **Rosetta 2** (`softwareupdate --install-rosetta`)
+- **Xcode Command Line Tools** (`xcode-select --install`)
+- **Homebrew** (arm64) with build tools:
+  `brew install cmake ninja nasm glslang pkgconf boost cryptopp`
+- **Python 3** (patch compiler and eboot preparation scripts)
+- **Your own decrypted game dump**: a `CUSA03173` folder (v1.09) containing `eboot.bin`,
+  `sce_sys/`, `sce_module/` and `dvdroot_ps4/`. `python3 scripts/game_check.py` verifies it.
 
-### Build Dependencies (Only if compiling from source)
-- MinGW-w64 GCC (via [w64devkit](https://github.com/skeeto/w64devkit) or MSYS2 MinGW64).
-- CMake 3.25+.
-- Ninja build tool.
-- SDL3 development libraries.
-- Vulkan SDK or Vulkan-Headers.
+## Quick start
 
----
+```sh
+git clone --recursive https://github.com/Wooloomooloo2/bloodborne_mac_port.git
+cd bloodborne_mac_port
 
-## Building and Running
+# 1. Build pinned x86-64 dependencies (SDL3, Vulkan loader, FFmpeg, ...) and MoltenVK into deps/
+bash scripts/macos/bootstrap_deps.sh
 
-### 1. Build from Source
+# 2. Build the GPU library and the loader (out/gpu/libbbgpu.dylib, out/bb-probe)
+bash build_macos.sh
 
-Clone the repository recursively:
-```cmd
-git clone --recursive https://github.com/Mrsuss60/bloodborne_pc_windows_port.git
-cd bloodborne_pc_windows_port
+# 3. Prepare the game image and launch (rebuilds if needed)
+BB_GAME_DIR=/path/to/CUSA03173 bash run.sh
 ```
 
-Ensure MinGW, CMake, and Ninja are accessible in your environment or PATH, then run:
-```cmd
-build.bat
-```
+`run.sh` points the Vulkan loader at the bundled MoltenVK ICD automatically. Saves and shader
+caches go to `user/`, settings to `bbport.ini`.
 
-This compiles LibAtrac9, the Vulkan video core (`out/gpu/bbgpu.dll`), and the main loader executable (`out/bbport.exe`).
+## Repository layout
 
-### 2. Launch the Game
-
-#### Option A: Using the Graphical Launcher (Recommended)
-Double-click `launch_gui.bat` or run:
-```cmd
-launch_gui.bat
-```
-- Select your `eboot.bin` file or game folder.
-- Select your target frame rate (60 FPS recommended for smooth frame pacing).
-- Select your internal resolution (e.g., 1280x720 with FSR enabled for high performance).
-- Enable desired patches under the Patches tab (e.g., *Performance Patch*, *Disable Motion Blur*, *Skip Intro*).
-- Click **Launch Bloodborne**.
-
-#### Option B: Using the Command Line
-Run `run.bat` pointing to your game directory:
-```cmd
-run.bat "C:\Games\Bloodborne\CUSA03173"
-```
-
-Save files and shader caches are stored in `user/`. Settings are saved to `bbport.ini`.
-
----
-
-## Controls and In-Game Features
-
-- **Gamepad**: Controllers are supported out of the box through SDL3.
-- **In-Game Settings**: Press `Insert` on keyboard or `L3 + R3` on gamepad to toggle the overlay menu.
-- **Free Camera**: When enabled in the launcher or overlay, hold `Cross` and press `L3` (or hold `Space` and press `Z` on keyboard) to cycle camera modes.
-- **Debug Menu**: If debug fonts (`DbgFont14h.ccm` and `DbgFont14h.tpf`) are installed into `dvdroot_ps4/font/`, open the menu using `Tab` or the controller touchpad.
-
----
-
-## Repository Layout
-
-| Path | Description |
+| Path | Contents |
 |---|---|
-| `src/` | Win32 loader (`probe.c`), memory management, and PS4 HLE runtime |
-| `gpu/` | Vulkan video core, multi-stage command pipeline, and upscaler integration |
-| `scripts/` | Eboot preparation, patch compiler (`patches.py`), and DLL staging |
-| `patches/` | Community XML patches for Bloodborne version 1.09 |
-| `launcher.py` | Tkinter desktop launcher for Windows |
-| `launch_gui.bat` | One-click shortcut for the graphical launcher |
-| `build.bat` | Windows build script |
-| `run.bat` | Direct execution batch script |
-| `tools/` | Developer utilities and patch extraction scripts |
-| `docs/` | Architecture notes, upscaler documentation, and change logs |
+| `src/` | Loader (`probe.c`) and PS4 HLE runtime |
+| `gpu/` | shadPS4-derived Vulkan video core, draw pipeline, upscaler integration |
+| `scripts/` | Eboot preparation, linking, patch compiler (`patches.py`); `scripts/macos/` dependency bootstrap |
+| `patches/` | Community XML patches for Bloodborne 1.09 |
+| `launcher/` | GTK launcher from the Linux port (Linux reference path) |
+| `tools/` | Developer utilities, including `pkg_extract` (fpkg unpacker) |
+| `docs/` | macOS plan and backlog, plus technical notes inherited from upstream |
 
----
+## Credits
 
-## Credits and Licenses
+This port stands entirely on the work of others:
 
-This project is licensed under the **GNU General Public License v2 or later** ([LICENSE](LICENSE)) due to its use of shadPS4 components.
+- **deadinside28** — author of `bbport`, the original native Linux port of Bloodborne: the flat memory image approach, the HLE
+  runtime, the two-stage Vulkan draw pipeline, synthetic motion vectors and the upscaler
+  integration.
+- **Mrsuss60** — [bloodborne_pc_windows_port](https://github.com/Mrsuss60/bloodborne_pc_windows_port),
+  the Windows port this repository was forked from, including its stability, audio, memory
+  and frame-pacing fixes (documented in that repository's `CHANGES.md`).
+- **[shadPS4](https://github.com/shadps4-emu/shadPS4)** project — the Vulkan video core and
+  shader recompiler (`gpu/shadps4/`, GPL-2.0-or-later).
+- **FireBurn** — [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan), the native Vulkan
+  FSR 3.1 / FSR 4 runtime (MIT; includes AMD FidelityFX SDK sources under MIT).
+- **Omar Cornut** — [Dear ImGui](https://github.com/ocornut/imgui), used for the in-game overlay (MIT).
+- **Alex Barney (Thealexbarney)** — [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9),
+  AT9 audio decoding (MIT).
+- **sirit** — SPIR-V emitter used by the shader recompiler (BSD-3-Clause), with Khronos
+  **SPIRV-Headers** (MIT-style Khronos license).
+- **Christian Rau** — [half](https://half.sourceforge.net/), IEEE 754 half-precision
+  library (MIT).
+- **AMD** — GCN PM4/register headers in `gpu/third_party/gcn/` (MIT-style AMD license).
+- **DejaVu fonts** (Bitstream Vera license) — overlay font.
+- **[MoltenVK](https://github.com/KhronosGroup/MoltenVK)** (Apache-2.0), and the dependencies
+  built by `scripts/macos/bootstrap_deps.sh`: SDL3, Vulkan-Headers / Vulkan-Loader, fmt,
+  xxHash, miniz, Zydis, FFmpeg, magic_enum, robin-map, Vulkan Memory Allocator, xbyak, Boost.
+- **Community patch authors** — Kyo, Lance McDonald, illusion, emoose, auser1337 and others
+  for the 60 FPS, camera and engine patches in `patches/Bloodborne.xml`.
+- **zackcage6** — testing and bug reports for the Windows port.
 
-Special thanks to the original creators and open source projects that made this port possible:
+Each third-party component keeps its own license file in its directory.
 
-- **deadinside28**: Creator of the original Linux port (`bbport`), pioneering the flat memory image architecture, custom Vulkan two-stage pipeline, and synthetic motion vector generation.
-- **shadPS4 Team**: Base Vulkan video core and shader recompiler.
-- **FireBurn**: FSR-Vulkan runtime and temporal upscaling backend.
-- **Thealexbarney**: LibAtrac9 audio decoding library.
-- **ocornut**: Dear ImGui library for the in-game settings overlay.
-- **Community Patch Authors**: Kyo, Lance McDonald, illusion, emoose, auser1337, and contributors for the 60 FPS, camera, and engine patches.
-- **zackcage6**: Testing and Bug reporting.
+## License
+
+GNU General Public License v2.0 or later (GPL-2.0-or-later), because of the shadPS4
+components. See [LICENSE](LICENSE).

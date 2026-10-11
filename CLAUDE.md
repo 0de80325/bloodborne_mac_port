@@ -74,20 +74,22 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
   (has `robustBufferAccess`, `robustImageAccess2`).
 - 2026-10-11 later: device created (Option A: no robustBufferAccess2/nullDescriptor, zero
   stand-in buffer); buffer cache uses one ordinary 16 GiB arena at 0x7000000000 on macOS (no
-  sparse binding in MoltenVK; Metal commits memory lazily, measured). The window opens, the
-  DualSense connects, the game loads textures, then a worker thread faults: its job-pool loop
-  (guest 0x263b246) virtual-calls a malformed job object (one pointer level too many; target in
-  .data 0x53b3260). Root cause not found yet — suspects: macOS memory aliasing bug in
-  flexible memory (0x7109…), or an HLE call behaving differently. Fault handler now prints
+  sparse binding in MoltenVK; Metal commits memory lazily, measured). Fault handler prints
   rax/rbx/rdi/rsi/rsp; `BB_TRACE=1` adds import logs and thread snapshots.
+- **The "job-pool crash" (SIGBUS at guest 0x53b3260, loop 0x263b246) is NOT a game crash:** it
+  only happens after `STOP: watchdog timeout` — the `BB_TIMEOUT` stack dump derails a worker.
+  Normal play (no BB_TIMEOUT) never hits it. Backlog (Stability). Don't chase it as a game bug.
 - **Milestone (2026-10-11):** with BC images created without Storage usage on macOS (Metal can't
   write compressed textures; this also removed ~520 MoltenVK "command buffer not begun" errors)
   the user created a character, saved, and loaded into the first level — playable, a little
   sluggish. Open issues: dark ghosting halo around the character (grows when zooming, never
   shrinks: likely an uncleared/accumulating target — suspects: null image bindings without
-  stand-ins, non-zeroed OOB reads, compute clears); the job-pool fault above may be triggered by
-  in-game actions (user was playing during those runs) — get the timeline.
-- Probe has a TEMP env-gated diagnostic `BB_FAULT_DUMP=1` (dumps 0x180 bytes at rbx twice).
+  stand-ins, non-zeroed OOB reads, compute clears). Ghosting seen only in character
+  creation, not in the level. Shader compilation stutter at start, then smooth-ish.
+- **2026-10-11 cleanup:** Windows support purged from our code (files, `_WIN32` branches via
+  unifdef, CMake WIN32 blocks, CMake bbport target); vendored `gpu/shadps4/` untouched. Docs,
+  launcher and overlay are English-only; README credits upstream. Overlay opens with ⌘, on macOS
+  (not F1: F1 is the game's Options key) and shows FPS + render → output resolution + upscaler.
 - A stale shader cache from a crashed run fails `serdes.h:109`; delete it. Test runs without
   `<data>/user` existing put GPU caches in `~/Library/Application Support/shadPS4` (path_util
   reads `BB_GPU_USER_DIR` at static init, before bbgpu_init sets it) — `mkdir out/macdata/user`.
@@ -99,8 +101,9 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
 
 ## Next steps (in order)
 
-1. Ghosting halo; null image bindings: 1x1 stand-in images (Option A, not done yet).
-2. Worker-thread job fault above (needs the user's timeline of what triggers it).
+1. Ghosting halo (character creation); null image bindings: 1x1 stand-in images (Option A).
+2. Performance: GPU-bound by ~287 render passes/frame on Apple TBDR — see MACOS_BACKLOG.md
+   Performance (first: log why each pass breaks). Tools: `sample <pid> 10`, Metal System Trace.
 3. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
 4. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
 
@@ -111,7 +114,7 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
   and request `VK_KHR_portability_enumeration` + `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR`.
 - Builds must not pick up arm64 libs from `/opt/homebrew` (bootstrap sets
   `CMAKE_IGNORE_PREFIX_PATH` and an isolated `PKG_CONFIG_LIBDIR`; do the same for bbport).
-- Existing docs in `docs/` (ROADMAP, history) are the upstream project's, partly in Russian.
+- `docs/` ROADMAP/upscaler/motion_vectors/MODS are translated upstream docs (Linux reference path).
 - **Rosetta + aliased memory:** code written through one alias and executed from another keeps
   the stale translation until a protection change (RW→RX) on the executing alias.
 - macOS timed mutex/rwlock waits are trylock+backoff (up to ~1 ms late); `CLOCK_MONOTONIC`

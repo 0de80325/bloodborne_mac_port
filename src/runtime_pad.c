@@ -16,9 +16,6 @@
 #include <time.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #define ERR_INVALID_ARG ((int32_t)0x80920001)
 #define ERR_INVALID_HANDLE ((int32_t)0x80920003)
@@ -169,24 +166,12 @@ static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check;
-#ifndef _WIN32
     static struct timespec mtime;
-#endif
     if (!checked) { path=getenv("BB_PAD_FILE"); checked=1; }
     if (!path || !*path) return;
     uint64_t now=now_us();
     if (now-last_check<20000) return;
     last_check=now;
-#ifdef _WIN32
-    static FILETIME last_ft;
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-    FILETIME ft;
-    GetFileTime(hFile, NULL, NULL, &ft);
-    CloseHandle(hFile);
-    if (ft.dwLowDateTime == last_ft.dwLowDateTime && ft.dwHighDateTime == last_ft.dwHighDateTime) return;
-    last_ft = ft;
-#else
     struct stat st;
     if (stat(path,&st)!=0) return;
 #ifdef __APPLE__
@@ -194,7 +179,6 @@ static void read_inject(void) {
 #endif
     if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
     mtime=st.st_mtim;
-#endif
     FILE *f=fopen(path,"r");
     if (!f) return;
     static const struct { const char *name; uint32_t ps; } names[]={

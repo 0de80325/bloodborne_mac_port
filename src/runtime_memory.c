@@ -12,16 +12,12 @@
 #include <limits.h>
 #include <time.h>
 #include <errno.h>
-#ifdef _WIN32
-#include "win32_memory.h"
-#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -137,14 +133,8 @@ static uint64_t align_up(uint64_t n, uint64_t a) { return (n+a-1) & ~(a-1); }
 static int host_prot(int prot) {
     return ((prot & 0x11) ? PROT_READ : 0) | ((prot & 0x22) ? PROT_WRITE|PROT_READ : 0) | ((prot & 4) ? PROT_EXEC|PROT_READ : 0);
 }
-#ifdef _WIN32
-#ifndef LOW_MIN
-#define LOW_MIN UINT64_C(0x0800000000)
-#endif
-static int space(void) { return win_mem_space(LOW_MIN,USER_MAX); }
-int runtime_memory_reserve_space(void) { return space(); }
-#elif defined(__APPLE__)
-/* The guest range is reserved (no access) once, as on Windows: place() maps over it with
+#ifdef __APPLE__
+/* The guest range is reserved (no access) once: place() maps over it with
  * MAP_FIXED semantics, which on macOS silently replace whatever host library got there
  * first (x86-64 mmap(NULL) under Rosetta hands out low addresses). Unmaps restore it. */
 static int space(void) {
@@ -165,14 +155,7 @@ int runtime_memory_reserve_space(void) { return 0; }
 #endif
 static int pool(void) {
     if (pool_fd>=0) return 0;
-#ifdef _WIN32
-    void *view = NULL;
-    if (space() || win_mem_section(POOL_SIZE+FLEX_SPAN,&view)) return -1;
-    backing_base = (unsigned char *)view; pool_fd = 0;
-    const char *selftest = getenv("BB_SELFTEST_MEM");
-    if (selftest && selftest[0] == '1') win_mem_run_selftest();
-    return 0;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     /* No memfd/fallocate, and a shm object cannot drop pages: F_PUNCHHOLE is for files
      * (which would write back), MADV_FREE_REUSABLE keeps shm data, MADV_ZERO is ENOTSUP
      * (always, under Rosetta). So the pool is one anonymous region; guest views are
@@ -194,9 +177,7 @@ static int pool(void) {
 #endif
 }
 static void punch(uint64_t phys, uint64_t size) {
-#ifdef _WIN32
-    win_mem_punch(phys, size);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     if (backing_base)
         mmap(backing_base+phys,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0);
 #else
@@ -237,9 +218,7 @@ static uint64_t flex_alloc(uint64_t size) {
 }
 static void flex_free(uint64_t phys, uint64_t size) {
     flex_set((phys-POOL_SIZE)/PAGE,size/PAGE,0);
-#ifdef _WIN32
-    if (backing_base) memset(backing_base+phys,0,size);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     punch(phys,size);
 #else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
@@ -310,19 +289,6 @@ static void drop_range(uintptr_t start, uintptr_t end) {
     }
     vma_erase(i,n);
 }
-#ifdef _WIN32
-/* A view piece remapped around a removed range (win32_memory.c) gets its pages' guest
- * protection back; the GPU forgets its page tracking state there. Runs before the table
- * changes, so the regions still describe the piece. */
-static void restore_remnant(uintptr_t start, uintptr_t end) {
-    for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i) {
-        if (vmas[i].kind==KIND_RESERVED) continue;
-        uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
-        win_mem_protect(a,b,host_prot(vmas[i].prot));
-    }
-    queue_hook(HOOK_INVALIDATE,start,end-start);
-}
-#endif
 /* Places a host mapping; with MAP_FIXED it replaces what the guest had there. */
 static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t alignment,
                      int kind, int type, uint64_t phys) {
@@ -335,12 +301,7 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
     }
-#ifdef _WIN32
-    if (space()) return NO_MEMORY;
-    if (kind!=KIND_RESERVED ? win_mem_map(address,address+size,phys,host_prot(prot),restore_remnant)
-                            : win_mem_release(address,address+size,restore_remnant)) return NO_MEMORY;
-    void *mapped=(void *)address;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     if (space()) return NO_MEMORY;
     void *mapped=(void *)address;
     if (kind!=KIND_RESERVED) {
@@ -439,10 +400,7 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
             uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
             queue_hook(HOOK_UNMAP,a,b-a);
         }
-#ifdef _WIN32
-    if (vma_index(start)<vma_count && vmas[vma_index(start)].start<end && win_mem_release(start,end,restore_remnant))
-        return INVALID;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i) { /* back to reserved */
         uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
         if (mmap((void *)a,b-a,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED) return INVALID;
@@ -540,11 +498,7 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     uintptr_t end=start+align_up(size,PAGE);
     start&=~(uintptr_t)(PAGE-1);
     if ((prot & ~0x37) || !covered(start,end,0)) return INVALID;
-#ifdef _WIN32
-    if (win_mem_protect(start,end,host_prot(prot))) return INVALID;
-#else
     if (mprotect((void *)start,end-start,host_prot(prot))) return INVALID;
-#endif
     int error; size_t i=carve(start,end,&error);
     if (error) return NO_MEMORY;
     for (; i<vma_count && vmas[i].start<end; ++i) { vmas[i].prot=prot; if (type>=0) vmas[i].type=type; }
@@ -656,19 +610,7 @@ static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map(size_t size, int prot) {
     size=align_up(size,PAGE);
     write_lock();
-#ifdef _WIN32
-    /* Read/write; the loader changes protection afterwards (VirtualProtect). */
-    (void)prot;
-    void *p=NULL;
-    if (!space())
-        while (!p && low_next+size<=USER_MIN) {
-            p=win_mem_private(low_next,low_next+size);
-            low_next+=size+PAGE; /* reserved gap catches overruns */
-        }
-    write_unlock();
-    CHECK_LOW_ADDR(p);
-    return p;
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     /* No MAP_FIXED_NOREPLACE: a hint is taken only when free, else the kernel returns the
      * next free range above it, where the search resumes. Stops below the hole at
      * 0xfc0000000 (see USER_MIN). */
@@ -882,6 +824,21 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
     read_unlock();
     return ok;
 }
+/* Reads through the backing view (diagnostics: compare with the guest's mapping); 0 when part
+ * of the range has no backing. */
+int runtime_memory_read_backing(uintptr_t address, void *out, uint64_t size) {
+    read_lock();
+    int ok=1;
+    for (uintptr_t at=address, end=address+size; at<end && ok;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        memcpy((unsigned char *)out+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),n);
+        at+=n;
+    }
+    read_unlock();
+    return ok;
+}
 /* Per-thread cache of recently found regions for the GPU's per-draw queries:
  * entries hold for as long as the table generation they were read at. */
 typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;
@@ -953,24 +910,9 @@ void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int 
         if (vmas[i].kind==KIND_RESERVED) continue;
         uintptr_t a=vmas[i].start>address ? vmas[i].start : address;
         uintptr_t b=vmas[i].end<address+size ? vmas[i].end : address+size;
-#ifdef _WIN32
-        int guest=vmas[i].prot;
-        int r = read && (guest & 0x11);
-        int w = write && (guest & 0x22);
-        int x = (guest & 4);
-        DWORD p = PAGE_NOACCESS;
-        if (x) {
-            p = w ? PAGE_EXECUTE_READWRITE : (r ? PAGE_EXECUTE_READ : PAGE_EXECUTE);
-        } else {
-            p = w ? PAGE_READWRITE : (r ? PAGE_READONLY : PAGE_NOACCESS);
-        }
-        DWORD old;
-        VirtualProtect((void *)a, b-a, p, &old);
-#else
         int guest=host_prot(vmas[i].prot);
         int want=(read ? PROT_READ : 0)|(write ? PROT_WRITE|PROT_READ : 0)|(guest & PROT_EXEC);
         mprotect((void *)a,b-a,guest & want);
-#endif
     }
     read_unlock();
 }

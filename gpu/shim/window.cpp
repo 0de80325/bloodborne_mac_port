@@ -31,10 +31,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
-#if defined(_WIN32)
-    window_info.type = WindowSystemType::Windows;
-    window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-#elif defined(__APPLE__)
+#ifdef __APPLE__
     // MoltenVK presents to a CAMetalLayer (VK_EXT_metal_surface), as in shadPS4.
     (void)wp;
     window_info.type = WindowSystemType::Metal;
