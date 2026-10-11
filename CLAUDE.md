@@ -1,6 +1,8 @@
 # CLAUDE.md — Bloodborne macOS port (session handoff)
 
 Read this first, then `docs/MACOS_PORT.md` (plan, porting table, progress checklist).
+Deferred work lives in `docs/MACOS_BACKLOG.md`: when taking a shortcut to get the game running,
+log the proper fix there under **1) Stability, 2) Performance, 3) Mac GUI** (priority order).
 
 ## What this repo is
 
@@ -62,11 +64,25 @@ original PS4 `eboot.bin` (x86-64 machine code) directly on the CPU.
   - Write faults arrive as SIGBUS on macOS (handled). Thread dumps via `task_threads`.
   - No missing `runtime_low_alloc` routing found: guest-visible objects already use it.
 
+## Boot status (2026-10-11)
+
+- `--cpu-only`: guest code runs (TLS, memory, ~30 threads, FMOD audio via CoreAudio) up to
+  graphics init, then faults on NULL objects from unbound `sceGnm*` imports (expected on any
+  platform: cpu-only skips `bbgpu_init`, which registers the GPU HLE symbols).
+- GPU boot (`run.sh`, no flag): window + Vulkan instance OK; stops in `Instance::CreateDevice`
+  (`vk_instance.cpp` ~272): MoltenVK lacks **`robustBufferAccess2`** and **`nullDescriptor`**
+  (has `robustBufferAccess`, `robustImageAccess2`).
+- macOS main thread: Cocoa needs the real main thread, so `probe.c` `main()` runs the game on a
+  64 MiB-stack thread and runs `CFRunLoopRun()`; `bbgpu_init` posts the window loop to the main
+  dispatch queue. (`dispatch_main()` does NOT work: SDL then reports "No available video device".)
+- Run: `BB_DATA_DIR=$PWD/out/macdata BB_GAME_DIR=/Users/markhall/Bloodborne/CUSA03173
+  BB_TIMEOUT=60 bash run.sh [--cpu-only]`; `BB_TRACE=1` logs unbound import calls.
+
 ## Next steps (in order)
 
-1. Boot with `--cpu-only` (no GPU) until the game reaches its main loop (`run.sh` picks
-   `build_macos.sh` and MoltenVK on Darwin).
-2. Enable GPU via MoltenVK; fix rendering gaps (geometry shaders, D24S8 → D32S8, etc.).
+1. Device creation on MoltenVK: decide how to live without `robustBufferAccess2` /
+   `nullDescriptor` (relax asserts on Apple + dummy descriptors / shader-side bounds checks).
+2. Continue the GPU boot to the title screen; fix rendering gaps (geometry shaders, D24S8 → D32S8).
 3. Hybrid Metal: MetalFX upscaler, zero-copy guest memory. Then launcher / `.app` bundle.
 
 ## Gotchas learned

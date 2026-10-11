@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <optional>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -320,6 +321,12 @@ private:
     VideoCore::PageManager page_manager;
     VideoCore::BufferCache buffer_cache;
     VideoCore::TextureCache texture_cache;
+    static constexpr u64 NullBufferSize = 64_KB;
+    /// bbport: zero-filled stand-in for null buffer bindings without nullDescriptor (MoltenVK).
+    std::optional<VideoCore::Buffer> null_buffer;
+    vk::Buffer NullBuffer() const {
+        return null_buffer ? null_buffer->Handle() : vk::Buffer{};
+    }
     AmdGpu::Liverpool* liverpool;
     Core::MemoryManager* memory;
     boost::icl::interval_set<VAddr> mapped_ranges;

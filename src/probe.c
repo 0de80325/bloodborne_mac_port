@@ -27,6 +27,7 @@
 #ifdef __APPLE__
 #include <sys/ucontext.h>
 #include <mach/mach.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_vm.h>
 #undef round_page /* <mach/vm_param.h> macros; probe.c has its own */
 #undef trunc_page
@@ -1324,7 +1325,33 @@ void runtime_restart(void) {
 #endif
 }
 
+#ifdef __APPLE__
+/* Cocoa (the SDL window and its events) only works on the main thread: the loader and the
+ * game run on this thread instead, and main() runs the main run loop, which serves the main
+ * dispatch queue (bbgpu.cpp). dispatch_main() would not do: it exits the main thread, and Cocoa
+ * then finds no main thread (SDL: "No available video device"). */
+static int probe_main(int argc, char **argv);
+static int main_argc;
+static char **main_argv;
+static void *game_thread(void *unused) {
+    (void)unused;
+    exit(probe_main(main_argc, main_argv));
+}
 int main(int argc, char **argv) {
+    main_argc = argc; main_argv = argv;
+    pthread_attr_t attr;
+    pthread_t thread;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64u << 20); /* the main thread's stack is 8 MiB; be generous */
+    if (pthread_create(&thread, &attr, game_thread, NULL)) { perror("pthread_create"); return 1; }
+    pthread_attr_destroy(&attr);
+    CFRunLoopRun();
+    return 0;
+}
+static int probe_main(int argc, char **argv) {
+#else
+int main(int argc, char **argv) {
+#endif
     setvbuf(stdout, NULL, _IONBF, 0);
 #ifdef _WIN32
     runtime_memory_reserve_space();
@@ -1649,4 +1676,5 @@ int main(int argc, char **argv) {
     start_watchdog();
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
     fail("entry unexpectedly returned");
+    return 1;
 }

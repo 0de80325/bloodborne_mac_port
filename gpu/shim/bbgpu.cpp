@@ -19,6 +19,9 @@
 #include <thread>
 #include <vector>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
 #include "../bbgpu.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -221,7 +224,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Bloodborne";
     const s32 width = config->width, height = config->height;
-    g_window_thread = std::thread([title, width, height] {
+    auto window_loop = [title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
         {
@@ -236,8 +239,17 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         LOG_INFO(Frontend, "Window closed by user");
         std::fflush(stdout);
         std::_Exit(0);
-    });
+    };
+#ifdef __APPLE__
+    // Cocoa only works on the main thread: bb-probe runs the game on another thread and runs
+    // the main run loop on the main thread, so the window and its event loop go to the main queue.
+    using Loop = decltype(window_loop);
+    dispatch_async_f(dispatch_get_main_queue(), new Loop(std::move(window_loop)),
+                     [](void* loop) { (*static_cast<Loop*>(loop))(); });
+#else
+    g_window_thread = std::thread(std::move(window_loop));
     g_window_thread.detach();
+#endif
     {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });

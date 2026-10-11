@@ -253,6 +253,10 @@ bool Instance::CreateDevice() {
     };
 
     // Required
+#ifdef __APPLE__
+    // bbport: required on portability (MoltenVK) devices.
+    add_extension("VK_KHR_portability_subset");
+#endif
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     ASSERT_MSG(add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME),
@@ -264,12 +268,25 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+#ifdef __APPLE__
+    // bbport: MoltenVK has neither. Out-of-bounds buffer reads are then only safe, not zero
+    // (docs/MACOS_BACKLOG.md), and null bindings use dummy resources (Rasterizer).
+    if (!robustness2_features.robustBufferAccess2) {
+        LOG_WARNING(Render_Vulkan, "robustBufferAccess2 unavailable: out-of-bounds reads not zeroed");
+    }
+    if (!robustness2_features.nullDescriptor) {
+        LOG_WARNING(Render_Vulkan, "nullDescriptor unavailable: binding dummy resources instead");
+    }
+#else
     ASSERT_MSG(robustness2_features.robustBufferAccess2,
                "Required Vulkan feature unavailable: robustBufferAccess2");
-    ASSERT_MSG(robustness2_features.robustImageAccess2,
-               "Required Vulkan feature unavailable: robustImageAccess2");
     ASSERT_MSG(robustness2_features.nullDescriptor,
                "Required Vulkan feature unavailable: nullDescriptor");
+#endif
+    ASSERT_MSG(robustness2_features.robustImageAccess2,
+               "Required Vulkan feature unavailable: robustImageAccess2");
+    robust_buffer_access2 = robustness2_features.robustBufferAccess2;
+    null_descriptor = robustness2_features.nullDescriptor;
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
@@ -489,9 +506,9 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
+            .robustBufferAccess2 = robust_buffer_access2,
             .robustImageAccess2 = true,
-            .nullDescriptor = true,
+            .nullDescriptor = null_descriptor,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
             .vertexInputDynamicState = true,

@@ -194,6 +194,11 @@ public:
         return amd_shader_explicit_vertex_parameter;
     }
 
+    /// bbport: false on MoltenVK; null bindings then need dummy resources.
+    bool IsNullDescriptorSupported() const {
+        return null_descriptor;
+    }
+
     /// Returns true when VK_EXT_primitive_topology_list_restart is supported for regular lists.
     bool IsListRestartSupported() const {
         return list_restart && list_restart_features.primitiveTopologyListRestart;
@@ -556,6 +561,8 @@ private:
     bool depth_range_unrestricted{};
     bool vertex_input_dynamic_state{};
     bool list_restart{};
+    bool robust_buffer_access2{};
+    bool null_descriptor{};
     bool provoking_vertex{};
     bool shader_stencil_export{};
     bool image_load_store_lod{};

@@ -65,7 +65,8 @@ python3 -c "import sys; sys.path.insert(0,'scripts'); import game_check; print(g
 - [x] macOS build script `build_macos.sh` for `gpu/` (bbgpu dylib) and the loader (2026-10-11)
 - [x] Runtime port: TLS via pthread TSD slot, low memory, signals, timed locks, thread dumps —
   compiles, unit tests pass under Rosetta (2026-10-11)
-- [ ] Boot with `--cpu-only`
+- [x] Boot with `--cpu-only`: guest runs to graphics init (stops on unbound Gnm, as expected) (2026-10-11)
+- [ ] GPU boot: window + Vulkan instance OK; device creation needs `robustBufferAccess2`/`nullDescriptor` workarounds
 - [ ] GPU on MoltenVK; fix rendering gaps
 - [ ] MetalFX upscaling, zero-copy guest memory
 - [ ] Launcher and `.app` bundle
