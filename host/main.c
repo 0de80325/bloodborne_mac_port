@@ -12,7 +12,9 @@
 #include "host.h"
 #include "gpu/bbgpu.h"
 #include <CoreFoundation/CoreFoundation.h>
+#include <dlfcn.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <inttypes.h>
 #include <mach/mach_vm.h>
 #include <mach/notify.h>
@@ -71,10 +73,22 @@ static void fault(int sig, siginfo_t *info, void *context) {
         siglongjmp(*recover, 1);
     }
     const ucontext_t *uc = context;
-    char line[160];
-    const int n = snprintf(line, sizeof line, "bbgpu-host: fatal fault (signal %d) at pc 0x%llx, address %p\n", sig,
-                           (unsigned long long)uc->uc_mcontext->__ss.__pc, info->si_addr);
+    const uintptr_t pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
+    char line[512];
+    Dl_info where;
+    int n;
+    /* The process is ending: dladdr/snprintf/backtrace are acceptable here. */
+    if (dladdr((void *)pc, &where) && where.dli_fname)
+        n = snprintf(line, sizeof line, "bbgpu-host: fatal fault (signal %d) at %s+0x%lx (%s), address %p\n", sig,
+                     where.dli_fname, (unsigned long)(pc - (uintptr_t)where.dli_fbase),
+                     where.dli_sname ? where.dli_sname : "?", info->si_addr);
+    else
+        n = snprintf(line, sizeof line, "bbgpu-host: fatal fault (signal %d) at pc 0x%lx, address %p\n", sig,
+                     (unsigned long)pc, info->si_addr);
     (void)!write(1, line, (size_t)n);
+    void *frames[32];
+    const int count = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, count, 1);
     signal(sig, SIG_DFL); /* returns into the fault again: the default action ends the process */
 }
 
