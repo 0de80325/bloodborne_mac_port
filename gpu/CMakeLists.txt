@@ -45,6 +45,21 @@ elseif (BB_PGO STREQUAL "use")
                         -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
 endif()
 
+# bbport: the native arm64 GPU host (docs/DESIGN_NATIVE_GPU_PROCESS.md) builds this library for
+# arm64 (scripts/macos/build_gpu_arm64.sh). Zydis and Xbyak only serve the x86-64 SRT-walker JIT
+# in the shader recompiler, so they are x86-64 only.
+if (CMAKE_OSX_ARCHITECTURES)
+    set(BB_TARGET_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+else()
+    set(BB_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+if (BB_TARGET_ARCH MATCHES "^(arm64|aarch64|ARM64)$")
+    set(BB_ARM64 ON)
+else()
+    set(BB_ARM64 OFF)
+endif()
+message(STATUS "bbgpu target architecture: ${BB_TARGET_ARCH}")
+
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
@@ -64,7 +79,11 @@ if (NOT APPLE)
     pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 endif()
 find_package(miniz REQUIRED)
-find_package(Zydis REQUIRED)
+set(BB_ZYDIS "")
+if (NOT BB_ARM64)
+    find_package(Zydis REQUIRED)
+    set(BB_ZYDIS Zydis::Zydis)
+endif()
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)
@@ -120,8 +139,12 @@ add_custom_target(host_shaders DEPENDS ${SHADER_HEADERS})
 file(GLOB_RECURSE VIDEO_CORE CONFIGURE_DEPENDS shadps4/video_core/*.cpp)
 file(GLOB_RECURSE RECOMPILER CONFIGURE_DEPENDS shadps4/shader_recompiler/*.cpp)
 list(FILTER VIDEO_CORE EXCLUDE REGEX "renderdoc\\.cpp$")
+set(BB_DECODER "")
+if (NOT BB_ARM64)
+    set(BB_DECODER shadps4/common/decoder.cpp)
+endif()
 set(COMMON
-    shadps4/common/decoder.cpp shadps4/common/error.cpp
+    ${BB_DECODER} shadps4/common/error.cpp
     shadps4/common/io_file.cpp shadps4/common/native_clock.cpp shadps4/common/number_utils.cpp
     shadps4/common/path_util.cpp shadps4/common/rdtsc.cpp shadps4/common/spin_lock.cpp shadps4/common/recursive_lock.cpp
     shadps4/common/string_util.cpp shadps4/common/thread.cpp shadps4/common/signal_context.cpp
@@ -165,7 +188,7 @@ endif()
 target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 if (APPLE)
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
-        tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit
+        tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz ${BB_ZYDIS} sirit
         "-framework Metal" "-framework MetalFX" "-framework QuartzCore" "-framework Foundation")
 else()
     target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum

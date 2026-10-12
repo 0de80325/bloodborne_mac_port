@@ -13,7 +13,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 #endif
-#include <x86intrin.h>
+#include "bbport_cpu.h"
 
 namespace BbWriteLog {
 namespace {
@@ -62,7 +62,7 @@ void Note(std::uint64_t address, const void* data, std::uint64_t size, Source so
 
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
     static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
-    Entry e{address, size, 0, __rdtsc(), source, tid};
+    Entry e{address, size, 0, bbport::CpuCycles(), source, tid};
     std::memcpy(&e.first, data, size < 8 ? size : 8);
     Push(ring, head, e);
     // Only small writes are scanned: scanning downloads of megabytes delays them enough to hide
@@ -89,7 +89,15 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     if (Mode() == 0 || !ucontext) {
         return;
     }
-#ifdef __APPLE__
+#if defined(__aarch64__)
+    // bbport: in the native arm64 GPU host a ucontext is an arm64 host context, never the
+    // guest's x86 registers (the guest faults in the x86-64 game process). Registers would have
+    // to be relayed from there; until then only the totals are reported.
+    std::fprintf(stderr, "Write log: guest registers unavailable in the arm64 GPU host; "
+                         "%llu writes logged\n", (unsigned long long)head.load());
+    return;
+    const std::uint64_t regs[8] = {}; // keeps the shared code below compiling
+#elif defined(__APPLE__)
     const auto& ss = static_cast<const ucontext_t*>(ucontext)->uc_mcontext->__ss;
     const std::uint64_t regs[] = {ss.__rax, ss.__rbx, ss.__rcx, ss.__rdx,
                                   ss.__rsi, ss.__rdi, ss.__r14, ss.__r15};
@@ -107,7 +115,7 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     }
     const char* sources[] = {"backing",      "WriteData",           "fence",
                              "EOP (decoded)", "WriteData (decoded)", "EOS (decoded)"};
-    const std::uint64_t now = __rdtsc();
+    const std::uint64_t now = bbport::CpuCycles();
     const auto print = [&](const Entry& e, const char* what) {
         std::fprintf(stderr,
                      "Write log: %s %s %#llx +%llu first %#llx tid %u, %.3f s before the fault\n",

@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# Builds the x86-64 macOS dependencies of bbport into deps/x86_64 (no sudo, no x86 Homebrew).
-# The whole process runs under Rosetta 2, so every library linked into it must be x86-64.
-# Host tools (cmake, ninja, nasm, glslang, pkgconf) come from the native arm64 Homebrew.
+# Builds the macOS dependencies of bbport (no sudo, no x86 Homebrew).
+#  - x86_64 (default) -> deps/x86_64: bb-probe and the game run under Rosetta 2, so every
+#    library linked into that process must be x86-64.
+#  - arm64 (BB_DEPS_ARCH=arm64) -> deps/arm64: the native GPU host process (bbgpu-host, see
+#    docs/DESIGN_NATIVE_GPU_PROCESS.md). Same pinned set minus the x86-only Zydis/Zycore/xbyak
+#    (they only serve the x86 SRT-walker JIT in the shader recompiler).
+# Each architecture has its own prefix, build directory and stamps; neither ever sees the
+# other's libraries. Host tools (cmake, ninja, nasm, glslang, pkgconf) come from the native
+# arm64 Homebrew.
 #
-#   bash scripts/macos/bootstrap_deps.sh            # build what is missing
-#   BB_DEPS_CLEAN=1 bash scripts/macos/bootstrap_deps.sh   # rebuild everything
+#   bash scripts/macos/bootstrap_deps.sh                   # x86-64: build what is missing
+#   BB_DEPS_ARCH=arm64 bash scripts/macos/bootstrap_deps.sh # arm64
+#   BB_DEPS_CLEAN=1 bash scripts/macos/bootstrap_deps.sh   # rebuild everything (that arch)
 set -euo pipefail
 cd -- "$(dirname -- "$0")/../.."
 ROOT=$PWD
 DEPS=$ROOT/deps
 SRC=$DEPS/src
-BUILD=$DEPS/build
-PREFIX=$DEPS/x86_64
+ARCH=${BB_DEPS_ARCH:-x86_64}
+case $ARCH in
+    x86_64) BUILD=$DEPS/build; OTHER=$DEPS/arm64 ;;   # historical build dir name kept
+    arm64) BUILD=$DEPS/build-arm64; OTHER=$DEPS/x86_64 ;;
+    *) echo "BB_DEPS_ARCH must be x86_64 or arm64, not $ARCH" >&2; exit 1 ;;
+esac
+PREFIX=$DEPS/$ARCH
 # Rosetta runs AVX2 code from macOS 15 on.
 export MACOSX_DEPLOYMENT_TARGET=15.0
 JOBS=$(sysctl -n hw.ncpu)
@@ -39,14 +51,17 @@ if ((${#need[@]})); then
     brew install cmake ninja nasm glslang pkgconf boost
 fi
 brew list boost >/dev/null 2>&1 || brew install boost
-arch -x86_64 /usr/bin/true 2>/dev/null || { echo 'Rosetta 2 is required: softwareupdate --install-rosetta' >&2; exit 1; }
+if [[ $ARCH == x86_64 ]]; then
+    arch -x86_64 /usr/bin/true 2>/dev/null || { echo 'Rosetta 2 is required: softwareupdate --install-rosetta' >&2; exit 1; }
+fi
 
-# Nothing from the arm64 Homebrew prefix may leak into x86-64 builds (headers-only Boost aside).
+# Nothing from the arm64 Homebrew prefix may leak into these builds (headers-only Boost aside),
+# and nothing from the other architecture's prefix (or an x86 Homebrew in /usr/local).
 export PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig
 unset PKG_CONFIG_PATH
-CMAKE_COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+CMAKE_COMMON=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=$ARCH
     -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET -DCMAKE_INSTALL_PREFIX="$PREFIX"
-    -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew
+    -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local;$OTHER"
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev)
 
 fetch() { # name url tag
@@ -72,13 +87,13 @@ fetch SDL https://github.com/libsdl-org/SDL.git $SDL_TAG
 fetch fmt https://github.com/fmtlib/fmt.git $FMT_TAG
 fetch xxHash https://github.com/Cyan4973/xxHash.git $XXHASH_TAG
 fetch miniz https://github.com/richgel999/miniz.git $MINIZ_TAG
-fetch zydis https://github.com/zyantific/zydis.git $ZYDIS_TAG
+[[ $ARCH == x86_64 ]] && fetch zydis https://github.com/zyantific/zydis.git $ZYDIS_TAG
 fetch Vulkan-Headers https://github.com/KhronosGroup/Vulkan-Headers.git $VULKAN_TAG
 fetch Vulkan-Loader https://github.com/KhronosGroup/Vulkan-Loader.git $VULKAN_TAG
 fetch magic_enum https://github.com/Neargye/magic_enum.git $MAGIC_ENUM_TAG
 fetch robin-map https://github.com/Tessil/robin-map.git $ROBIN_MAP_TAG
 fetch VulkanMemoryAllocator https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git $VMA_TAG
-fetch xbyak https://github.com/herumi/xbyak.git $XBYAK_TAG
+[[ $ARCH == x86_64 ]] && fetch xbyak https://github.com/herumi/xbyak.git $XBYAK_TAG
 fetch FFmpeg https://github.com/FFmpeg/FFmpeg.git $FFMPEG_TAG
 
 cmake_dep Vulkan-Headers .
@@ -87,14 +102,16 @@ cmake_dep SDL . -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=
 cmake_dep fmt . -DFMT_TEST=OFF -DFMT_DOC=OFF
 cmake_dep xxHash cmake_unofficial -DBUILD_SHARED_LIBS=OFF -DXXHASH_BUILD_XXHSUM=OFF
 cmake_dep miniz . -DBUILD_SHARED_LIBS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_FUZZERS=OFF
-# Zydis builds against its bundled Zycore, but its installed CMake config also needs an
-# installed Zycore (find_dependency): install the same copy separately.
-cmake_dep zycore ../zydis/dependencies/zycore -DZYCORE_BUILD_SHARED_LIB=OFF
-cmake_dep zydis . -DZYDIS_BUILD_TOOLS=OFF -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_DOXYGEN=OFF
+if [[ $ARCH == x86_64 ]]; then
+    # Zydis builds against its bundled Zycore, but its installed CMake config also needs an
+    # installed Zycore (find_dependency): install the same copy separately.
+    cmake_dep zycore ../zydis/dependencies/zycore -DZYCORE_BUILD_SHARED_LIB=OFF
+    cmake_dep zydis . -DZYDIS_BUILD_TOOLS=OFF -DZYDIS_BUILD_EXAMPLES=OFF -DZYDIS_BUILD_DOXYGEN=OFF
+fi
 cmake_dep magic_enum . -DMAGIC_ENUM_OPT_BUILD_EXAMPLES=OFF -DMAGIC_ENUM_OPT_BUILD_TESTS=OFF
 cmake_dep robin-map .
 cmake_dep VulkanMemoryAllocator .
-cmake_dep xbyak .
+[[ $ARCH == x86_64 ]] && cmake_dep xbyak .
 
 # Boost is used header-only; headers are architecture-independent.
 if [[ ! -e $PREFIX/include/boost ]]; then
@@ -104,11 +121,12 @@ fi
 if ! stamp FFmpeg; then
     echo "== build FFmpeg (several minutes)"
     mkdir -p "$BUILD/FFmpeg"
+    ffarch=$ARCH; [[ $ARCH == arm64 ]] && ffarch=aarch64
     (cd "$BUILD/FFmpeg" && "$SRC/FFmpeg/configure" --prefix="$PREFIX" \
-        --arch=x86_64 --target-os=darwin --enable-cross-compile \
-        --cc="clang -arch x86_64" --cxx="clang++ -arch x86_64" \
+        --arch=$ffarch --target-os=darwin --enable-cross-compile \
+        --cc="clang -arch $ARCH" --cxx="clang++ -arch $ARCH" \
         --extra-cflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
-        --extra-ldflags="-arch x86_64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
+        --extra-ldflags="-arch $ARCH -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
         --enable-shared --disable-static --disable-programs --disable-doc \
         --disable-autodetect --enable-videotoolbox --enable-audiotoolbox \
         --install-name-dir='@rpath' >"$BUILD/FFmpeg.log" 2>&1 \
@@ -120,13 +138,15 @@ fi
 # MoltenVK: the release dylib is universal (arm64 + x86_64). Registered with the loader
 # through an ICD manifest; run scripts point VK_DRIVER_FILES at it.
 if ! stamp MoltenVK; then
-    echo "== fetch MoltenVK $MOLTENVK_TAG"
-    curl -fsSL -o "$SRC/MoltenVK-macos.tar" \
-        "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-macos.tar"
+    if [[ ! -f $SRC/MoltenVK-macos.tar ]]; then
+        echo "== fetch MoltenVK $MOLTENVK_TAG"
+        curl -fsSL -o "$SRC/MoltenVK-macos.tar" \
+            "https://github.com/KhronosGroup/MoltenVK/releases/download/$MOLTENVK_TAG/MoltenVK-macos.tar"
+    fi
     rm -rf "$BUILD/MoltenVK" && mkdir -p "$BUILD/MoltenVK"
     tar -xf "$SRC/MoltenVK-macos.tar" -C "$BUILD/MoltenVK"
     dylib=$(find "$BUILD/MoltenVK" -name libMoltenVK.dylib -path '*macOS*' | head -1)
-    lipo "$dylib" -verify_arch x86_64 || { echo 'MoltenVK dylib lacks x86_64' >&2; exit 1; }
+    lipo "$dylib" -verify_arch $ARCH || { echo "MoltenVK dylib lacks $ARCH" >&2; exit 1; }
     cp "$dylib" "$PREFIX/lib/"
     mkdir -p "$PREFIX/share/vulkan/icd.d"
     cat > "$PREFIX/share/vulkan/icd.d/MoltenVK_icd.json" <<'JSON'
@@ -143,7 +163,7 @@ JSON
 fi
 
 echo
-echo "x86-64 dependencies ready in $PREFIX"
+echo "$ARCH dependencies ready in $PREFIX"
 for lib in libvulkan.1.dylib libSDL3.0.dylib libMoltenVK.dylib libavcodec.dylib; do
     printf '  %-22s %s\n' "$lib" "$(lipo -archs "$PREFIX/lib/$lib" 2>/dev/null || echo missing)"
 done

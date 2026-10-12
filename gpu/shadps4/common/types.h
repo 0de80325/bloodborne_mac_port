@@ -27,6 +27,10 @@ using PAddr = uintptr_t;
 
 #ifdef _WIN32
 #define PS4_SYSV_ABI __attribute__((sysv_abi, nothrow))
+#elif defined(__aarch64__)
+// bbport: the native arm64 GPU host (bbgpu-host) never calls into or out of guest x86 code
+// directly, and sysv_abi does not exist on AArch64: use the platform convention.
+#define PS4_SYSV_ABI
 #else
 #define PS4_SYSV_ABI __attribute__((sysv_abi))
 #endif

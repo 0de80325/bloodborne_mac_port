@@ -4,10 +4,14 @@
 #include <unordered_map>
 #include <boost/container/flat_map.hpp>
 #include <queue>
+#include "common/arch.h"
+#ifdef ARCH_X86_64
+// bbport: the SRT walker is JIT-compiled x86-64 code (Xbyak, disassembled/patched with Zydis);
+// the native arm64 GPU host builds without both (see the #else branch at the end).
 #include <xbyak/xbyak.h>
 #include <xbyak/xbyak_util.h>
-#include "common/arch.h"
 #include "common/decoder.h"
+#endif
 #include "common/io_file.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"

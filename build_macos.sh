@@ -63,8 +63,20 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
 cflags=(-std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${ARCH[@]}")
-"$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -framework CoreFoundation -o out/bb-probe
+"$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/gpu_process.c src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -framework CoreFoundation -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
+# Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md; BB_GPU_PROCESS=1). Its window
+# needs the arm64 SDL3 from deps/arm64 (scripts/macos/bootstrap_deps.sh); without it the host
+# builds with no window.
+ARM64_PREFIX=$ROOT/deps/arm64
+host_flags=()
+if [[ -f $ARM64_PREFIX/lib/pkgconfig/sdl3.pc ]]; then
+    read -r -a host_flags <<< "$(PKG_CONFIG_LIBDIR=$ARM64_PREFIX/lib/pkgconfig pkg-config --cflags --libs sdl3)"
+    host_flags+=(-DBBGPU_HOST_SDL=1 -Wl,-rpath,"$ARM64_PREFIX/lib")
+fi
+/usr/bin/clang -arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c11 -O2 -g -Wall -Wextra -Werror \
+    host/main.c "${host_flags[@]}" -o out/bbgpu-host
+echo "Built $PWD/out/bbgpu-host (arm64, window: $([[ ${#host_flags[@]} -gt 0 ]] && echo SDL3 || echo none))"
 # GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${ARCH[@]}" "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" \
     -Wl,-rpath,"$PREFIX/lib" -o out/bb-gpu-capabilities

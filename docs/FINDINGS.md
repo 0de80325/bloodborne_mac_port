@@ -172,6 +172,13 @@ doorbells (~5 µs) and fault relays (~24 µs) all work.
 **Measurement gotcha:** under Rosetta, `CLOCK_THREAD_CPUTIME_ID` is badly wrong (reported 21 ms
 for 871 ms of work). Use `thread_info(THREAD_EXTENDED_INFO)` / Mach thread times instead.
 
+### Native GPU host (M2, 2026-10-12)
+
+`BB_GPU_PROCESS=1` starts `out/bbgpu-host` (native arm64): ready in 350–380 ms, maps the guest
+memory entry at the same addresses (0x7000000000–0xfc00000000) and mirrors all 20 guest views
+(4.8 GiB); 9 periodic checksum comparisons per run all match. Killing the host leaves the game
+running single-process. Without the variable nothing changes (same menu run, same warnings).
+
 ## Part 3 — Open issues
 
 | Issue | Status |

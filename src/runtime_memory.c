@@ -18,6 +18,7 @@
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include "gpu_process.h"
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -88,6 +89,11 @@ static int shared_pool(void) {
 }
 /* The pool's memory entry (MACH_PORT_NULL before the first guest map or without sharing). */
 mach_port_t runtime_memory_pool_entry(void) { return pool_entry; }
+/* M2: guest view changes forwarded to the native GPU process (gpu_process.c), under the lock. */
+static RuntimeMemoryMirror mirror;
+#define MIRROR(op,address,size,phys,prot) do { if (mirror) mirror(op,address,size,phys,prot); } while (0)
+#else
+#define MIRROR(op,address,size,phys,prot) ((void)0)
 #endif
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
@@ -367,6 +373,8 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) return NO_MEMORY;
     if (kind==KIND_FLEXIBLE) flexible_bytes+=size;
     if (kind!=KIND_RESERVED) queue_hook(HOOK_MAP,address,size);
+    if (kind!=KIND_RESERVED) MIRROR(RUNTIME_MIRROR_MAP,address,size,phys,prot);
+    else MIRROR(RUNTIME_MIRROR_UNMAP,address,size,0,0);
     log_mem_op(1, address, size, prot);
     *inout=mapped;
     return 0;
@@ -457,6 +465,7 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
         if (munmap((void *)a,b-a)) return INVALID;
     }
 #endif
+    MIRROR(RUNTIME_MIRROR_UNMAP,start,end-start,0,0);
     log_mem_op(2, start, size, 0);
     drop_range(start,end);
     return 0;
@@ -549,6 +558,7 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     if (error) return NO_MEMORY;
     for (; i<vma_count && vmas[i].start<end; ++i) { vmas[i].prot=prot; if (type>=0) vmas[i].type=type; }
     queue_hook(HOOK_INVALIDATE,start,end-start);
+    MIRROR(RUNTIME_MIRROR_PROTECT,start,end-start,0,prot);
     log_mem_op(3, start, size, prot);
     ++protects;
     return 0;
@@ -971,6 +981,72 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
     read_unlock();
     return result;
 }
+#ifdef __APPLE__
+uint64_t runtime_memory_pool_entry_size(void) { return POOL_SIZE+FLEX_SPAN; }
+int runtime_memory_create_pool(void) {
+    write_lock();
+    int result=pool();
+    write_unlock();
+    return result;
+}
+void runtime_memory_set_mirror(RuntimeMemoryMirror fn) {
+    write_lock();
+    mirror=fn;
+    if (fn) for (size_t i=0;i<vma_count;++i)
+        if (vmas[i].kind!=KIND_RESERVED) fn(RUNTIME_MIRROR_MAP,vmas[i].start,vmas[i].end-vmas[i].start,vmas[i].phys,vmas[i].prot);
+    write_unlock();
+}
+/* Checksum through the backing view (never protected), streamed across adjacent views. */
+static int backing_checksum(uintptr_t address, uint64_t size, uint64_t *out) {
+    uint64_t h=BBGPU_CHECKSUM_SEED;
+    for (uintptr_t at=address, end=address+size; at<end;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) return 0;
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        h=bbgpu_checksum(h,backing_base+vmas[i].phys+(at-vmas[i].start),n);
+        at+=n;
+    }
+    *out=h;
+    return 1;
+}
+int runtime_memory_mirror_checksum(uintptr_t address, uint64_t size, uint64_t *out) {
+    read_lock();
+    int ok=backing_base && backing_checksum(address,size,out);
+    read_unlock();
+    return ok;
+}
+void runtime_memory_mirror_snapshot(unsigned rotate, uint64_t max_sample, void (*emit)(const RuntimeMirrorSnapshot *)) {
+    RuntimeMirrorSnapshot s={0};
+    read_lock();
+    size_t mapped=0;
+    for (size_t i=0;i<vma_count;++i) if (vmas[i].kind!=KIND_RESERVED) { ++mapped; s.bytes+=vmas[i].end-vmas[i].start; }
+    s.views=mapped;
+    /* Samples: windows of views spread over the table, starting at a rotating index, that hold
+     * resident pages (untouched pages would be faulted in for nothing and only compare zeros). */
+    const unsigned max_count=sizeof(s.samples)/sizeof(*s.samples);
+    const uint64_t host_page=(uint64_t)getpagesize();
+    char resident[UINT64_C(1)<<20>>12];
+    max_sample=max_sample/PAGE*PAGE;
+    if (max_sample>sizeof(resident)*host_page) max_sample=sizeof(resident)*host_page;
+    if (backing_base && max_sample) for (size_t n=0, i=vma_count ? (size_t)rotate*7919%vma_count : 0;
+                                         n<vma_count && n<512 && s.count<max_count; ++n, i=(i+1)%vma_count) {
+        Vma v=vmas[i];
+        if (v.kind==KIND_RESERVED) continue;
+        uint64_t length=v.end-v.start, window=length<max_sample ? length : max_sample;
+        uint64_t offset=(uint64_t)rotate*(UINT64_C(1)<<20)%(length-window+PAGE)/PAGE*PAGE;
+        unsigned char *at=backing_base+v.phys+offset;
+        if (mincore(at,window,resident)) continue;
+        int any=0;
+        for (uint64_t p=0;p<window/host_page && !any;++p) any=resident[p]&1;
+        if (!any) continue;
+        RuntimeMirrorSample *sample=&s.samples[s.count++];
+        sample->address=v.start+offset; sample->size=window;
+        sample->checksum=bbgpu_checksum(BBGPU_CHECKSUM_SEED,at,window);
+    }
+    emit(&s);
+    read_unlock();
+}
+#endif
 void runtime_memory_report(void) {
     printf("Runtime: direct memory allocations=%zu, maps=%zu, live=%" PRIu64 ", budget=%" PRIu64 "\n",
            allocations, maps, live_bytes, POOL_SIZE);

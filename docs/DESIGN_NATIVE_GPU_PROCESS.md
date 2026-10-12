@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **M0 spike passed — GO; M1 done** (2026-10-11); M2 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0 spike passed — GO; M1 and M2 done** (2026-10-12); M3 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 
@@ -101,7 +101,15 @@ The interface is already narrow (measured from the code):
 | Event queues | `sceKernelCreateEqueue`, `sceKernelWaitEqueue` with GPU events | Runtime side; host posts events through the ring |
 | AvPlayer (FFmpeg video) | `sceAvPlayer*` | Decide in M6: keep in `bb-probe` (x86 FFmpeg) or move to the host |
 
-Classifying all 327 is a mechanical early task (M2).
+Classifying all 327 is a mechanical early task (M2). **Done — [`HLE_CLASSIFICATION.md`](HLE_CLASSIFICATION.md):**
+Bloodborne imports only **77** of the 327; only **12** need cross-process traffic (5 submit/flip:
+`sceGnmSubmitCommandBuffers` (~65–80/frame — ring push + doorbell, no reply),
+`SubmitAndFlipCommandBuffers`, `SubmitDone`, `DingDong`, `sceVideoOutSubmitFlip`; 7 load-time
+registrations with request/reply), plus 2 shared status values (`GetFlipStatus`,
+`AreSubmitsAllowed`). Draws never pass through HLE (the game's static Gnm library writes packets).
+Event queues move wholesale into `bb-probe` (the host posts interrupts/flips/vblanks to an event
+ring); **AvPlayer stays in `bb-probe`** (guest callbacks, x86 FFmpeg). Timebase: Rosetta's
+`rdtsc` equals `cntvct_el0` at 1 GHz on M4 Max (measured in M2-A); pass the process start time.
 
 ### 3.4 GPU page tracking across processes
 
@@ -146,8 +154,8 @@ The host's own views stay writable: protection only matters where the game runs.
 |---|---|---|
 | **M0** | **Feasibility spike (1–2 days) — go/no-go** | (a) x86-64 and arm64 processes map one memory entry at identical VAs and exchange data correctly under TSO/weak ordering; (b) doorbell and message round-trip latency measured; (c) **the same synthetic Vulkan workload** (~1,600 draws/frame, push descriptors, ~200 render passes) built x86-64 (Rosetta) and arm64, CPU time per frame compared — this number decides whether the project is worth it |
 | M1 ✅ | Shared guest memory in the runtime | Game runs single-process on the memory-entry backing (no behaviour change) — done: `pool_entry` in `runtime_memory.c`, zero-in-place `punch()` (resident pages only), `BB_SHARED_GUEST_MEMORY=0` fallback; same FPS and launch time |
-| M2 | arm64 deps, `bbgpu-host` builds, HLE classification | Host starts, opens the window, maps guest memory |
-| M3 | Command path | Title screen renders through the host |
+| M2 ✅ | arm64 deps, `bbgpu-host` builds, HLE classification | Host starts, opens the window, maps guest memory — done: `deps/arm64`, `out/gpu-arm64/libbbgpu.dylib`, `out/bbgpu-host` (native arm64, ready in ~350 ms), `BB_GPU_PROCESS=1` handshake via `mach_ports_register`, all 20 guest views (4.8 GiB) mirrored at the same VAs with matching checksums; game continues single-process if the host dies; [`HLE_CLASSIFICATION.md`](HLE_CLASSIFICATION.md) |
+| M3 | Command path (prerequisite: a portable SRT walker — the shader recompiler JITs **x86** code to read shader resource tables (`FlattenExtendedUserdataPass`/`RegisterWalkerCode`, xbyak/Zydis); on arm64 it hits `UNREACHABLE`, and the pipeline cache serializes those x86 bytes, so the host needs an interpreted walker or an arm64 JIT plus a separate cache) | Title screen renders through the host |
 | M4 | Page tracking + events across processes | Gameplay renders correctly; no stale-data glitches |
 | M5 | Input, overlay, text input in the host | Fully playable |
 | M6 | AvPlayer, restart, crash handling, diagnostics | Feature parity with single-process |

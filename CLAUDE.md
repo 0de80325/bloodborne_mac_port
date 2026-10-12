@@ -113,8 +113,10 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 
 1. **Native arm64 GPU process** (docs/DESIGN_NATIVE_GPU_PROCESS.md): M0 spike passed (1.75× on
    MoltenVK-style CPU work). M1 done (guest pool = Mach named entry, `runtime_memory_pool_entry()`,
-   `BB_SHARED_GUEST_MEMORY=0` fallback). Next: M2 — arm64 deps (`deps/arm64`), `bbgpu-host`
-   executable that opens the window and maps the guest memory; classify the 327 HLE functions.
+   `BB_SHARED_GUEST_MEMORY=0` fallback). M2 done (2026-10-12): `BB_DEPS_ARCH=arm64 bash scripts/macos/bootstrap_deps.sh`,
+   `scripts/macos/build_gpu_arm64.sh` → `out/gpu-arm64/libbbgpu.dylib`, `out/bbgpu-host` (`host/`),
+   `BB_GPU_PROCESS=1` (`src/gpu_process.c`) mirrors guest memory into the host; HLE split in
+   `docs/HLE_CLASSIFICATION.md`. Next: M3 — portable SRT walker, submit ring, title screen via host.
 2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
    as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
 3. Rendering: half-rendered character after reloading a save; ghosting in character creation;
@@ -122,6 +124,9 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 4. Launcher / `.app` bundle.
 
 ## Gotchas learned
+
+- **Never attach lldb/debugserver to a Rosetta (x86-64) process and kill it**: on 2026-10-12 it
+  wedged Rosetta (every new x86 process hung in state U until it recovered hours later).
 
 - First launch after a rebuild is slow (~20 s to the window) and stutters: shader/pipeline caches
   rebuild. Time launches with warm caches.
