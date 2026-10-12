@@ -197,6 +197,18 @@ diagnostic showed memory consistent but the submitted size cutting a packet). Th
 exists, with a much smaller window, in single-process mode — the likely cause of the
 intermittent crash on loading a save. Fixed in both modes by numbering SubmitDone calls.
 
+### GPU time per render pass (2026-10-12, city scene, split mode)
+
+`BB_PASS_LOG=<file> BB_PASS_LABELS=1` + a Metal System Trace of `bbgpu-host` + `tools/pass_trace.py`
+attribute GPU time to render passes (MoltenVK names render encoders after their command buffer,
+numbered here; tessellated draws split a pass into several encoders, which the tool merges).
+Per frame: fragment 25.5 ms, vertex 5.5 ms, compute 2.2 ms (MetalFX ~0.5 ms, tessellation
+emulation ~0.3 ms). **Biggest single cost: ~20 passes per frame with no attachments and no pixel
+shader (vertex shaders that only write memory) kept the device-maximum render area, 16384×16384:
+~0.3 ms of tiling each, ~6 ms per frame.** A 16×16 area for such passes: **27.5 → 33.9 FPS**,
+image unchanged (toggle `NoOutputPassArea`, bit 58). Next: the G-buffer pass (6 colour targets +
+D32S8 at 1280×720) is split ~15 times per frame, each split loading and storing all targets.
+
 **Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
 hours (new x86 processes hung in state U); it recovered on its own.
 

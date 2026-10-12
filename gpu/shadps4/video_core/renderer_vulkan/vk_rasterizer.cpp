@@ -3046,6 +3046,18 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     if (key.motion_vectors) {
         object_motion->Attach(state, state.width, state.height);
     }
+    // bbport: draws with no pixel shader and no attachments (vertex shaders that only write
+    // memory) produce no fragments anyone can see, but the render area stayed at the device
+    // maximum, 16384x16384: Apple's tiler walked ~260k tiles for each such pass, ~0.3 ms apiece,
+    // ~6 ms per frame in the city (Metal System Trace, tools/pass_trace.py). A tiny area keeps the
+    // vertex work and drops the tiling.
+    if (state.num_color_attachments == 0 && !state.depth_stencil_attachment.has_depth &&
+        !state.depth_stencil_attachment.has_stencil &&
+        !pipeline->GetStages()[u32(Shader::SwStage::Fragment)] &&
+        !BbToggle::Disabled(BbToggle::NoOutputPassArea)) {
+        state.width = 16;
+        state.height = 16;
+    }
     return state;
 }
 

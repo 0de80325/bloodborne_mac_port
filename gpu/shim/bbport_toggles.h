@@ -65,6 +65,9 @@ enum : std::uint64_t {
     /// Scene textures use BB_ANISO (16) times anisotropic filtering instead of the game's
     /// ratio; bit set: the game's own samplers (A/B while the game runs).
     ForcedAniso = 1ull << 61,
+    /// Passes with no attachments and no pixel shader use a 16x16 render area instead of the
+    /// device maximum (16384x16384, ~0.3 ms of tiling each on Apple GPUs); bit set: maximum.
+    NoOutputPassArea = 1ull << 58,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {

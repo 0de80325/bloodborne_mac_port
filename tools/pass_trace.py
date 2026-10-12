@@ -59,26 +59,43 @@ def main():
         n, _, label = line.rstrip('\n').partition(' ')
         passes[n].append(label)
 
-    encoders = collections.defaultdict(list)  # cb number -> [(start, encoder id)]
+    # Encoders per Metal command buffer, in order. MoltenVK emulates tessellation with a compute
+    # encoder per tessellated draw, which splits the render pass around it: a render encoder right
+    # after such a compute encoder that followed the same pass continues that pass.
+    per_mtl = collections.defaultdict(list)
     for r in load(enc_path):
         if 'bbgpu-host' not in lab(r.get('process')):
             continue
-        # Render encoders carry the Vulkan command buffer's name (the Metal command buffer may be
-        # one MoltenVK created for the submission, named after the queue).
-        m = re.fullmatch(r'cb#(\d+)', lab(r.get('encoder-label')))
-        if m:
-            encoders[m.group(1)].append((num(r.get('start')), lab(r.get('encoder-id'))))
+        per_mtl[lab(r.get('cmdbuffer-id'))].append(
+            (num(r.get('start')), lab(r.get('encoder-label')), lab(r.get('encoder-id'))))
+    segments = collections.defaultdict(list)  # cb number -> [[encoder ids of one pass]]
+    for encs in per_mtl.values():
+        encs.sort()
+        prev_render, prev_was_tess = None, False
+        for _, label, eid in encs:
+            m = re.fullmatch(r'cb#(\d+)', label)
+            if m:
+                n = m.group(1)
+                if prev_was_tess and prev_render == n:
+                    segments[n][-1].append(eid)
+                else:
+                    segments[n].append([eid])
+                prev_render, prev_was_tess = n, False
+            elif 'tess control' in label:
+                prev_was_tess = True
+            else:
+                prev_render, prev_was_tess = None, False
 
     label_of, matched, skipped = {}, 0, 0
-    for n, encs in encoders.items():
-        encs.sort()
+    for n, segs in segments.items():
         logged = passes.get(n, [])
-        if len(encs) != len(logged):
+        if len(segs) != len(logged):
             skipped += 1
             continue
         matched += 1
-        for (_, eid), label in zip(encs, logged):
-            label_of[eid] = label
+        for seg, label in zip(segs, logged):
+            for eid in seg:
+                label_of[eid] = label
 
     time = collections.defaultdict(lambda: collections.Counter())
     count = collections.Counter()

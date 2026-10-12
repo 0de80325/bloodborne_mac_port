@@ -73,6 +73,9 @@ Each item: what was done for now, what the refinement is, and where it lives.
   Desktop GPUs barely pay for pass breaks; Apple TBDR does. *Refinement:* log why rendering
   ends between draws (barriers, layout changes, copies/clears, compute), merge passes with the
   same attachments, use DONT_CARE load/store where contents are dead.
+- **Fixed 2026-10-12:** attachment-less passes with no pixel shader rendered over a 16384×16384
+  area (~6 ms/frame of tiling); now 16×16 (27.5 → 33.9 FPS in the city). Remaining pass work:
+  G-buffer splits (6 MRT + depth reloaded ~15×/frame) — merge or mark contents.
 - **Measured 2026-10-11, correcting the pass-count theory:** of ~287 fragment passes per frame,
   62% take <0.02 ms (3.5% of GPU time); 15% take 0.25–2 ms and hold ~72% — the cost is real
   shading in heavy passes (game defaults; port extras are off), not TBDR load/store. Only ~18% of
