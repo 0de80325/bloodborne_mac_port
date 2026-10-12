@@ -77,6 +77,9 @@ static void touch_click(PadData *d, int right) {
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
+    /* Without a window in this process (the GPU process split: the window and its event loop are
+     * in bbgpu-host) nothing pumps SDL's events: poll the gamepads here. */
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) SDL_UpdateGamepads();
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     if (!gamepad) {
         int count=0;
