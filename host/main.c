@@ -303,6 +303,8 @@ static void find_vulkan_driver(void) {
 
 int main(void) {
     find_vulkan_driver();
+    /* A signal ends the host as a signal, not as SDL's polite quit event (exit status 0). */
+    setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
     say("pid %d, %s, page %d bytes", (int)getpid(), translated() ? "TRANSLATED (Rosetta)" : "native arm64", getpagesize());
     /* The guest range first, before anything (Metal, the window server) maps memory there. The
      * kernel hole below 0x7000000000 is the same in arm64 processes. */
@@ -361,5 +363,6 @@ int main(void) {
     if (status) { say("setup failed; exiting"); return 1; }
     say("ready: serving the submit ring");
     CFRunLoopRun(); /* Cocoa: the renderer's window and its event loop run on the main thread */
+    say("main run loop returned; exiting");
     return 0;
 }

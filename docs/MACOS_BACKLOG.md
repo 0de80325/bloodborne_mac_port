@@ -11,13 +11,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
 
 ## 1. Stability
 
-- **PARKED (2026-10-13): turning subpixel jitter on mid-game in split mode closes the game.**
-  The host exits with status 0 about 12 s later (the window loop's quit/close path; no error
-  logged), after a grey screen. Deterministic repro: `echo 33554432 > t.txt; BB_TOGGLE_FILE=$PWD/t.txt`
-  … load a save, then `echo 0 > t.txt` (toggle bit 25 = jitter off; the host now watches the toggle
-  file too). Image still correct 3 s after the toggle. Suspects: the upscaler reset path
-  (MetalFX/FSR history recreation) in the host; what posts SDL_EVENT_QUIT. Workaround: set jitter
-  in the menu, then restart the game.
+- **PARKED (2026-10-13): the game window sometimes closes by itself in split mode** (grey screen,
+  then the host exits with status 0 and no error). Seen 3 times: after turning subpixel jitter on
+  in the menu (user), after the same via `BB_TOGGLE_FILE` (bit 25), and during a profiling run with
+  an Instruments attach; NOT reproduced in 3 later runs (toggle, screenshot, plain play), so
+  intermittent. Instrumented: the window loop now prints which SDL event closed it ("Window: …"),
+  the host prints when its run loop returns, and SDL no longer turns SIGINT/SIGTERM into a quit
+  event in the host (a signal now shows as a signal). Next occurrence: read those lines.
 - **Shader/pipeline compile stutter on first sight of effects** (attacks, blood): compiles block the
   frame. The pipeline cache was invalidated on 2026-10-12 (SRT walker format), so effects recompile
   once. *Proper:* compile in the background with a fallback (skip the draw or use a generic

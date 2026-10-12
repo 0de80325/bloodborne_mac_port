@@ -1,3 +1,4 @@
+#include <cstdio>
 // bbport: SDL3 window for the Vulkan swapchain (X11, Wayland or Metal on macOS).
 #include <cstdlib>
 #include <cstring>
@@ -130,6 +131,11 @@ bool WindowSDL::PollEvents() {
         }
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            // bbport: say which, so an unexpected close can be traced.
+            std::printf("Window: %s; closing\n", event.type == SDL_EVENT_QUIT
+                                                     ? "quit requested (SDL_EVENT_QUIT)"
+                                                     : "window close requested");
+            std::fflush(stdout);
             is_open = false;
             break;
         default:
