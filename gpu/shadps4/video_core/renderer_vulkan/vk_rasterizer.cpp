@@ -28,6 +28,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
+static int PassLabels();
 
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
@@ -1143,6 +1144,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     DebugState.IncDrawCall();
+    if (PassLabels() == 2) {
+        scheduler.EndRendering();
+    }
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -1262,6 +1266,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         }
     });
     DebugState.IncDrawCall();
+    if (PassLabels() == 2) {
+        scheduler.EndRendering();
+    }
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -3574,10 +3581,43 @@ u32 Rasterizer::GetGpuCommandProcessorThreadId() {
 
 namespace Vulkan {
 
+// bbport: with BB_PASS_LOG=<file>, BB_PASS_LABELS=1 logs every render pass (size, targets,
+// shaders) under its numbered command buffer, in recording order: the k-th render encoder of
+// Metal command buffer "cb#N" in a Metal System Trace is the k-th pass logged for N
+// (tools/pass_trace.py). BB_PASS_LABELS=2 also ends the pass after every draw, so each draw gets
+// its own encoder (GPU time per draw; diagnostic only, the extra pass breaks cost time).
+static int PassLabels() {
+    static const int mode = [] {
+        const char* env = std::getenv("BB_PASS_LABELS");
+        return env ? std::atoi(env) : 0;
+    }();
+    return mode;
+}
+
 void Rasterizer::MarkPass(const GraphicsPipeline* pipeline, const RenderState& state) {
+    const bool pass_labels = PassLabels() != 0 && BbPassLog::Enabled();
     auto* profiler = GpuProfiler::Get();
-    if (!profiler || !scheduler.WillBeginRendering(state)) {
+    if ((!profiler && !pass_labels) || !scheduler.WillBeginRendering(state)) {
         return;
+    }
+    if (pass_labels) {
+        std::string targets;
+        for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+            targets += cb_descs[cb].first
+                           ? vk::to_string(texture_cache.GetImage(cb_descs[cb].first).info.pixel_format)
+                           : std::string{"-"};
+            targets += ' ';
+        }
+        const auto* ps_stage = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        auto name = std::make_shared<std::string>(fmt::format(
+            "pass {}x{} [{}] depth {} vs {:016x} ps {:016x}", state.width, state.height, targets,
+            db_desc.first ? vk::to_string(texture_cache.GetImage(db_desc.first).info.pixel_format)
+                          : std::string{"-"},
+            pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash, ps_stage ? ps_stage->pgm_hash : 0));
+        scheduler.Record([name](vk::CommandBuffer cmdbuf) { BbPassLog::Pass(cmdbuf, *name); });
+        if (!profiler) {
+            return;
+        }
     }
     const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];

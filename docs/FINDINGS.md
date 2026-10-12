@@ -205,7 +205,7 @@ hours (new x86 processes hung in state U); it recovered on its own.
 | Issue | Status |
 |---|---|
 | CPU-bound draw recording at 720p | Next: re-profile at 720p to see what dominates now |
-| Intermittent "Unimplemented PM4 type 0" on loading a save | Likely fixed 2026-10-12 (early GpuIdle released the submission lock); confirm on save loads |
+| Intermittent "Unimplemented PM4 type 0" / bad fence packets on loading a save | **Root cause found 2026-10-12:** the game rewrites command buffers after the submit returns, before the (asynchronous) parser reads them. Split mode (default) now copies DCB/CCB at submit into a shared arena: 0 crashes in 5 stressed save loads (was 2 in 3). Single-process mode still parses the game's memory (smaller window): backlog |
 | Character half-rendered after quitting to the menu and reloading | Logged (backlog, Stability) |
 | Ghosting halo around the character in character creation | Logged; null image stand-ins not done yet |
 | MetalFX distant shimmer | Try `BB_METALFX_JITTER_SIGN=-1`; jitter must be on |

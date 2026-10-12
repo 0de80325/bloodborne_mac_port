@@ -103,6 +103,37 @@ static void WaitGpuIdle() {
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 
+// bbport: command buffer copies for the GPU host (host/bbgpu_shared.h arena). The game may rewrite
+// a command buffer once the submit returns; the host parses later, so it parses a copy made here.
+// The arena restarts after each SubmitDone: the next submit waits for its GpuIdle, by which time
+// the host has parsed every earlier copy (m_submit_lock held throughout).
+static u64 arena_used;
+static bool arena_restart;
+
+/// Copies `bytes` of a command buffer into the arena; its arena offset, or -1 when it is full.
+static s64 CopyToArena(const u32* source, u32 bytes) {
+    if (arena_restart) {
+        arena_used = 0;
+        arena_restart = false;
+    }
+    const u64 aligned = (u64(bytes) + 255) & ~u64(255);
+    if (arena_used + aligned > BBGPU_ARENA_SIZE) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            LOG_WARNING(Lib_GnmDriver, "Split: command buffer arena full ({} MiB in one frame); "
+                                       "submitting without copies",
+                        BBGPU_ARENA_SIZE >> 20);
+        }
+        return -1;
+    }
+    auto* arena = reinterpret_cast<u8*>(BbSplit::Shared()) + BBGPU_ARENA_OFFSET;
+    std::memcpy(arena + arena_used, source, bytes);
+    const s64 offset = s64(arena_used);
+    arena_used += aligned;
+    return offset;
+}
+
 // bbport: the game's side of the GPU process split (bbport_split.h). Validation and the
 // submission lock stay here; the work goes to the host in submit records, in order.
 static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_sizes_in_bytes,
@@ -128,6 +159,26 @@ static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_si
             record.dcb_bytes[i] = dcb_sizes_in_bytes[done + i];
             record.ccb[i] = ccb_gpu_addrs ? reinterpret_cast<u64>(ccb_gpu_addrs[done + i]) : 0;
             record.ccb_bytes[i] = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[done + i] : 0;
+        }
+        // Copy the whole record's buffers, or none (the host reads one kind of address).
+        u64 copies[2][BBGPU_SUBMIT_MAX];
+        bool copied = true;
+        for (u32 i = 0; i < n && copied; ++i) {
+            const s64 d = CopyToArena(reinterpret_cast<const u32*>(record.dcb[i]), record.dcb_bytes[i]);
+            const s64 c = record.ccb[i] && record.ccb_bytes[i]
+                              ? CopyToArena(reinterpret_cast<const u32*>(record.ccb[i]),
+                                            record.ccb_bytes[i])
+                              : 0;
+            copied = d >= 0 && c >= 0;
+            copies[0][i] = u64(d);
+            copies[1][i] = record.ccb[i] && record.ccb_bytes[i] ? u64(c) : ~u64(0);
+        }
+        if (copied) {
+            record.copied = 1;
+            for (u32 i = 0; i < n; ++i) {
+                record.dcb[i] = copies[0][i];
+                record.ccb[i] = copies[1][i];
+            }
         }
         bbgpu_submit_pack(&record);
         record.r.bytes = bbgpu_submit_bytes(n);
@@ -2445,6 +2496,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
             submission_lock = 1;
             submit_dones_issued.fetch_add(1, std::memory_order_release);
         }
+        arena_restart = true; // m_submit_lock held: the next submit comes after GpuIdle
         const BbGpuRecord record{BBGPU_REC_SUBMIT_DONE, sizeof(BbGpuRecord)};
         BbSplit::Push(&record);
         ++frames_submitted;
@@ -3410,9 +3462,15 @@ bool BbSplitHost(const BbGpuRecord* r) {
         bbgpu_submit_unpack(r, &s);
         u32* dcb[BBGPU_SUBMIT_MAX];
         u32* ccb[BBGPU_SUBMIT_MAX];
+        auto* arena = reinterpret_cast<u8*>(BbSplit::Shared()) + BBGPU_ARENA_OFFSET;
         for (u32 i = 0; i < s.count; ++i) {
-            dcb[i] = reinterpret_cast<u32*>(s.dcb[i]);
-            ccb[i] = reinterpret_cast<u32*>(s.ccb[i]);
+            if (s.copied) {
+                dcb[i] = reinterpret_cast<u32*>(arena + s.dcb[i]);
+                ccb[i] = s.ccb[i] == ~u64(0) ? nullptr : reinterpret_cast<u32*>(arena + s.ccb[i]);
+            } else {
+                dcb[i] = reinterpret_cast<u32*>(s.dcb[i]);
+                ccb[i] = reinterpret_cast<u32*>(s.ccb[i]);
+            }
         }
         u32** ccb_addrs = s.has_ccb_addrs ? ccb : nullptr;
         u32* ccb_sizes = s.has_ccb_sizes ? s.ccb_bytes : nullptr;

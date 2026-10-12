@@ -33,8 +33,13 @@
 #define BBGPU_GUEST_MAX UINT64_C(0xfc00000000)
 
 #define BBGPU_SHARED_MAGIC 0x31424742u /* "BGB1" */
-#define BBGPU_SHARED_VERSION 2u /* 2: M4 protect and fault rings */
-#define BBGPU_SHARED_SIZE (UINT64_C(4) << 20)
+#define BBGPU_SHARED_VERSION 3u /* 3: command buffer copy arena */
+#define BBGPU_CONTROL_SIZE (UINT64_C(4) << 20) /* control block and rings */
+/* Command buffer copies (game side, at submit; the host parses these): the game may rewrite its
+ * command buffers once the submit returns, before the host has parsed them. */
+#define BBGPU_ARENA_OFFSET BBGPU_CONTROL_SIZE
+#define BBGPU_ARENA_SIZE (UINT64_C(64) << 20)
+#define BBGPU_SHARED_SIZE (BBGPU_CONTROL_SIZE + BBGPU_ARENA_SIZE)
 #define BBGPU_SUBMIT_RING_BYTES (UINT64_C(2) << 20)
 #define BBGPU_EVENT_RING_BYTES (UINT64_C(512) << 10)
 #define BBGPU_REQUEST_SLOTS 32 /* requests and fault relays in flight (bit mask in a u32) */
@@ -90,6 +95,7 @@ typedef struct {
     BbGpuRecord r;
     uint32_t count;
     uint32_t has_ccb_addrs, has_ccb_sizes;
+    uint32_t copied, pad; /* copied: dcb/ccb are byte offsets into the arena, not guest addresses */
     uint32_t vo_handle, buf_idx, flip_mode; /* SUBMIT_GFX_FLIP */
     int64_t flip_arg;
     uint64_t dcb[BBGPU_SUBMIT_MAX], ccb[BBGPU_SUBMIT_MAX];
@@ -199,7 +205,7 @@ typedef struct {
 BBGPU_STATIC_ASSERT(sizeof(BbGpuShared) <= BBGPU_SUBMIT_RING_OFFSET, "control block fits before the rings");
 #define BBGPU_PROTECT_RING_OFFSET (BBGPU_EVENT_RING_OFFSET + BBGPU_EVENT_RING_BYTES)
 #define BBGPU_FAULT_RING_OFFSET (BBGPU_PROTECT_RING_OFFSET + BBGPU_PROTECT_RING_BYTES)
-BBGPU_STATIC_ASSERT(BBGPU_FAULT_RING_OFFSET + BBGPU_FAULT_RING_BYTES <= BBGPU_SHARED_SIZE, "rings fit");
+BBGPU_STATIC_ASSERT(BBGPU_FAULT_RING_OFFSET + BBGPU_FAULT_RING_BYTES <= BBGPU_CONTROL_SIZE, "rings fit");
 BBGPU_STATIC_ASSERT(sizeof(BbGpuSubmit) % 8 == 0 && sizeof(BbGpuFlipEvent) % 8 == 0, "record alignment");
 
 static inline uint32_t bbgpu_submit_bytes(uint32_t count) {

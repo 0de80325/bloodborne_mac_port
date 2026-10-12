@@ -56,6 +56,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
   a pad-state block (design 3.5); (c) losing the host after the renderer started ends the game —
   *proper:* restart both; (d) the settings menu's Restart travels host → game as an event (not
   yet exercised in game); (e) watchdog/hang dumps in bb-probe report the game side only.
+- **Command buffers parsed after the game rewrote them (single-process mode).** The game reuses
+  DCB/CCB memory soon after `sceGnmSubmitCommandBuffers` returns; the GPU thread parses later
+  ("Unimplemented PM4 type 0" on save loads). Split mode copies them at submit (arena in the
+  shared block). *Proper for single-process:* copy at submit too (upstream's copy-GPU-buffers
+  option, or the same arena); nested indirect buffers are still read from guest memory in both.
 - **SRT walker faulting loads stay zeroed for good** (upstream behaviour, kept in the portable
   interpreter). *Proper:* zero only for the walk that faulted, if repeated faults are cheap enough.
 

@@ -27,6 +27,34 @@
 
 namespace Vulkan {
 
+namespace BbPassLog {
+namespace {
+std::mutex mutex;
+std::unordered_map<VkCommandBuffer, u64> ids;
+std::FILE* file = [] {
+    const char* path = std::getenv("BB_PASS_LOG");
+    return path && *path ? std::fopen(path, "w") : nullptr;
+}();
+u64 next_id;
+} // namespace
+bool Enabled() {
+    return file != nullptr;
+}
+u64 Assign(vk::CommandBuffer cmdbuf) {
+    if (!file) {
+        return 0;
+    }
+    std::scoped_lock lock{mutex};
+    return ids[static_cast<VkCommandBuffer>(cmdbuf)] = ++next_id;
+}
+void Pass(vk::CommandBuffer cmdbuf, const std::string& label) {
+    std::scoped_lock lock{mutex};
+    const auto it = ids.find(static_cast<VkCommandBuffer>(cmdbuf));
+    std::fprintf(file, "%llu %s\n", static_cast<unsigned long long>(it == ids.end() ? 0 : it->second),
+                 label.c_str());
+}
+} // namespace BbPassLog
+
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
@@ -494,6 +522,13 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     };
 
     current_cmdbuf = command_pool.Commit();
+    // bbport: BB_PASS_LOG=<file> numbers each command buffer ("cb#N"): MoltenVK labels the Metal
+    // command buffer and its render encoders with that name, and the rasterizer logs the passes
+    // recorded into it in order, so a Metal System Trace can be joined to them (vk_rasterizer.cpp
+    // MarkPass).
+    if (const u64 id = BbPassLog::Assign(current_cmdbuf)) {
+        SetObjectName(instance.GetDevice(), current_cmdbuf, "cb#{}", id);
+    }
     Check(current_cmdbuf.begin(begin_info));
 
     // Invalidate dynamic state so it gets applied to the new command buffer.

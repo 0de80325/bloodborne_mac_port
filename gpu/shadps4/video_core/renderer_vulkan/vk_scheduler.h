@@ -33,6 +33,14 @@ class VkCtxScope;
 
 namespace Vulkan {
 
+/// bbport: BB_PASS_LOG=<file>: numbered command buffers and the render passes recorded into them
+/// (vk_scheduler.cpp).
+namespace BbPassLog {
+bool Enabled();
+u64 Assign(vk::CommandBuffer cmdbuf);
+void Pass(vk::CommandBuffer cmdbuf, const std::string& label);
+} // namespace BbPassLog
+
 class Instance;
 
 struct RenderAttachment {
