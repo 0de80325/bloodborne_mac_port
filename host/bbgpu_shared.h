@@ -63,6 +63,7 @@ enum {
     BBGPU_REC_VIEW,                /* BbGpuViewRecord: guest view map/unmap/protect (mirror) */
     BBGPU_REC_VERIFY,              /* BbGpuVerifyRecord: mirror check, answered on the control port */
     BBGPU_REC_START,               /* BbGpuStart (request): start the renderer with the configuration */
+    BBGPU_REC_TEXT_BEGIN,          /* BbGpuTextBegin (request): open the window's text entry (IME) */
     BBGPU_REC_COUNT,
 };
 
@@ -73,6 +74,7 @@ enum {
     BBGPU_EV_FLIP,             /* BbGpuFlipEvent: a flip was presented */
     BBGPU_EV_EOP_FLIP_QUEUED,  /* BbGpuFlipEvent: an end-of-pipe flip entered the queue */
     BBGPU_EV_VBLANK,           /* BbGpuVblank */
+    BBGPU_EV_RESTART,          /* no payload: the settings menu asked to restart the game */
 };
 
 /* ---- M4 page tracking: protect ring (host -> game), fault ring (game -> host) ---- */
@@ -129,6 +131,7 @@ typedef struct {
     struct { uint64_t address, size, checksum; } samples[8];
 } BbGpuVerifyRecord;
 typedef struct { BbGpuRecord r; uint32_t slot, pad; } BbGpuStart; /* configuration: in the block */
+typedef struct { BbGpuRecord r; uint32_t slot, pad; char initial[512], prompt[128]; } BbGpuTextBegin;
 
 typedef struct { BbGpuRecord r; uint32_t id, seq; } BbGpuIrq;
 typedef struct { BbGpuRecord r; uint64_t address, size; uint32_t read, write, seq, pad; } BbGpuProtect;
@@ -180,6 +183,10 @@ typedef struct {
      * for the game's pad emulation; keys_valid once written. Input proper is M5. */
     uint32_t keys_valid, overlay_captures; /* overlay_captures: the settings menu is open */
     uint8_t keys[512];
+    /* Text entry in the host window (IME dialog): text_state 0 typing, 1 confirmed, 2 cancelled;
+     * text_seq bumps with each update (written by the host, the game polls). */
+    uint32_t text_active, text_state, text_seq, pad1;
+    char text[512];
     BBGPU_ALIGNAS(BBGPU_CACHE_LINE) BbGpuReply replies[BBGPU_REQUEST_SLOTS];
     uint32_t reply_slots_used; /* game side: bit mask of slots in use */
     /* M4: the last protect request the game applied (futex word; compare as signed u32 deltas). */

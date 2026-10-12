@@ -1,7 +1,7 @@
 /* Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md), runtime side: spawns
  * out/bbgpu-host, hands it the guest memory entry and the shared control block, mirrors every
  * guest view into it at the same addresses; probe.c then starts the renderer there. macOS only,
- * opt-in with BB_GPU_PROCESS=1; without it nothing here runs. */
+ * on by default; BB_GPU_PROCESS=0 keeps the renderer in bb-probe (single process). */
 #pragma once
 #include <stdint.h>
 

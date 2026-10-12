@@ -120,7 +120,10 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
    (bytecode), shared control block + rings (`host/bbgpu_shared.h`), host links the arm64 GPU
    library (`host/host_runtime.c`), game side in "remote" mode (`gpu/shim/bbport_split.*`).
    Tests pass (`tests/test_bbgpu_rings.c`, `tests/test_gpu_split.c`); the title screen renders
-   through the host at 60 FPS. Next: M4 (protection relay), then M5 (input in the host).
+   through the host at 60 FPS. M4 (protect/fault relays) done: gameplay renders correctly. Split
+   mode is the DEFAULT on macOS (`BB_GPU_PROCESS=0` = single process); text entry and Restart
+   go through the host; keyboard bridged, gamepads polled in bb-probe. Same FPS as single
+   process in the GPU-bound city scene (27.5), steadier worst frames. Next: render-pass merging.
 2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
    as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
 3. Rendering: half-rendered character after reloading a save; ghosting in character creation;

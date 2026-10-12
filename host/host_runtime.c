@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #define _DARWIN_C_SOURCE
 #include "host.h"
+#include "gpu/bbgpu.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <mach/mach_vm.h>
@@ -272,4 +273,9 @@ int runtime_file_translate(const char *guest, char *out, size_t size) {
 void runtime_thread_attach_host(const char *name) { (void)name; }
 void runtime_thread_set_blocked(const char *what, uint64_t resource) { (void)what; (void)resource; }
 void runtime_thread_clear_blocked(void) {}
-void runtime_restart(void) { say("restart requested from the host (not supported yet)"); }
+/* The settings menu's Restart: bb-probe restarts through run.sh (exec); this process ends when
+ * it sees the exec (main.c parent_watch) and the new bb-probe starts a new host. */
+void runtime_restart(void) {
+    say("restart requested: asking bb-probe to restart");
+    bbgpu_split_post_restart();
+}

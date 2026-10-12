@@ -576,7 +576,7 @@ int main(int argc, char **argv) {
 #ifdef __APPLE__
     /* Before SDL/MoltenVK map anything: on macOS large host mmaps land in the guest range. */
     if (runtime_memory_reserve_space()) fail("cannot reserve guest address range");
-    /* BB_GPU_PROCESS=1: the native arm64 GPU process (M2: guest memory mirrored, no rendering). */
+    /* The native arm64 GPU process renders (BB_GPU_PROCESS=0: single process). */
     gpu_process_start();
 #endif
     time_t t_now = time(NULL);

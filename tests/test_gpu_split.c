@@ -131,7 +131,18 @@ int main(void) {
     CHECK(vblank_status(handle, &vb1) == 0 && vb1.count > vb0.count + 10, "vblanks: %llu -> %llu",
           (unsigned long long)vb0.count, (unsigned long long)vb1.count);
     printf("split test: %llu vblanks in 0.5 s\n", (unsigned long long)(vb1.count - vb0.count));
-    printf("PASS: GPU process split: renderer in the arm64 host, submits, GpuIdle, flips and vblanks\n");
+    /* Text entry (IME dialog) in the host window: open with a preset, read it back. */
+    CHECK(bbgpu_text_input_begin("Hunter", "Name") == 1, "text entry did not open in the host window");
+    char text[64] = "";
+    int state = -1;
+    t0 = now_ms();
+    do {
+        sleep_ms(5);
+        state = bbgpu_text_input_poll(text, sizeof text);
+    } while (strcmp(text, "Hunter") && now_ms() - t0 < 2000);
+    CHECK(state == 0 && !strcmp(text, "Hunter"), "text entry: state %d, text '%s'", state, text);
+    printf("split test: text entry open in the host window, preset read back\n");
+    printf("PASS: GPU process split: renderer in the arm64 host, submits, GpuIdle, flips, vblanks, text entry\n");
     fflush(stdout);
     _exit(0); /* the host sees this process exit and ends too */
 }

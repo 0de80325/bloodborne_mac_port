@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **M0 spike passed — GO; M1, M2 and M3 done** (2026-10-12): the title screen renders through the native host at 60 FPS. M4 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0–M4 done, split mode is the default** (2026-10-12; `BB_GPU_PROCESS=0` = single process). Gameplay renders correctly through the native host. In the GPU-bound city scene FPS is unchanged (27.5 both modes; the GPU-feeding thread waits on the GPU 59% → 72%), worst frames are steadier (37–58 ms vs 49–75 ms). Next lever: render-pass merging (GPU side). Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 

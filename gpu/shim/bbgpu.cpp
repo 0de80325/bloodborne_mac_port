@@ -264,11 +264,29 @@ extern "C" int bbgpu_host_start(const BbGpuConfig* config, void* shared) {
                 }
                 __atomic_store_n(&s->overlay_captures, BbOverlay::CapturesInput() ? 1u : 0u,
                                  __ATOMIC_RELAXED);
+                // Text entry (IME dialog): publish the text and its state while it is open.
+                if (__atomic_load_n(&s->text_active, __ATOMIC_ACQUIRE) && g_window) {
+                    std::string text;
+                    const int state = g_window->PollTextInput(text);
+                    const size_t n = std::min(text.size(), sizeof s->text - 1);
+                    std::memcpy(s->text, text.data(), n);
+                    s->text[n] = 0;
+                    __atomic_store_n(&s->text_state, static_cast<u32>(state), __ATOMIC_RELEASE);
+                    __atomic_fetch_add(&s->text_seq, 1u, __ATOMIC_RELEASE);
+                    if (state != 0) {
+                        __atomic_store_n(&s->text_active, 0u, __ATOMIC_RELEASE);
+                    }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(4));
             }
         }).detach();
     }
     return result;
+}
+
+extern "C" void bbgpu_split_post_restart(void) {
+    const BbGpuRecord record{BBGPU_EV_RESTART, sizeof(BbGpuRecord)};
+    BbSplit::Post(&record);
 }
 
 extern "C" int bbgpu_host_fault(uint64_t address, int write) {
@@ -287,6 +305,21 @@ extern "C" int bbgpu_host_fault(uint64_t address, int write) {
 
 extern "C" int bbgpu_host_dispatch(const void* record) {
     const auto* r = static_cast<const BbGpuRecord*>(record);
+    if (r->type == BBGPU_REC_TEXT_BEGIN) {
+        auto* t = static_cast<const BbGpuTextBegin*>(record);
+        BbGpuShared* s = BbSplit::Shared();
+        int opened = 0;
+        if (g_window) {
+            const std::string initial(t->initial, strnlen(t->initial, sizeof t->initial));
+            const std::string prompt(t->prompt, strnlen(t->prompt, sizeof t->prompt));
+            g_window->BeginTextInput(initial, prompt.empty() ? "Text" : prompt);
+            __atomic_store_n(&s->text_state, 0u, __ATOMIC_RELAXED);
+            __atomic_store_n(&s->text_active, 1u, __ATOMIC_RELEASE);
+            opened = 1;
+        }
+        bbgpu_reply_send(s, t->slot, opened);
+        return 1;
+    }
     if (r->type == BBGPU_REC_INVALIDATE) {
         const auto* range = static_cast<const BbGpuRange*>(record);
         Core::Memory::Instance()->InvalidateMemory(range->address, range->size);
@@ -536,12 +569,29 @@ extern "C" int bbgpu_overlay_captures_input(void) {
 }
 
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
+    if (BbSplit::Remote()) {
+        BbGpuTextBegin record{};
+        record.r = {BBGPU_REC_TEXT_BEGIN, sizeof(BbGpuTextBegin)};
+        std::snprintf(record.initial, sizeof record.initial, "%s", initial ? initial : "");
+        std::snprintf(record.prompt, sizeof record.prompt, "%s", prompt ? prompt : "Text");
+        return BbSplit::Request(&record, &record.slot) != 0 ? 1 : 0;
+    }
     if (!g_window) return 0;
     g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
     return 1;
 }
 
 extern "C" int bbgpu_text_input_poll(char* out, uint64_t size) {
+    if (BbSplit::Remote()) {
+        BbGpuShared* s = BbSplit::Shared();
+        const u32 state = __atomic_load_n(&s->text_state, __ATOMIC_ACQUIRE);
+        if (size) {
+            const size_t n = std::min<size_t>(strnlen(s->text, sizeof s->text), size - 1);
+            std::memcpy(out, s->text, n);
+            out[n] = 0;
+        }
+        return static_cast<int>(state);
+    }
     if (!g_window) return 2;
     std::string text;
     const int state = g_window->PollTextInput(text);

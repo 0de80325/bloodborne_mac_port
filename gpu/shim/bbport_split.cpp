@@ -15,6 +15,7 @@
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool; // gnmdriver.cpp
 
 extern "C" void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+extern "C" void runtime_restart(void); // bb-probe (probe.c)
 
 namespace Libraries::VideoOut {
 void BbSplitApplyEvent(const BbGpuRecord* record);
@@ -179,6 +180,9 @@ void StartEventDispatcher() {
             case BBGPU_EV_EOP_FLIP_QUEUED:
             case BBGPU_EV_VBLANK:
                 Libraries::VideoOut::BbSplitApplyEvent(r);
+                break;
+            case BBGPU_EV_RESTART:
+                runtime_restart(); // execs run.sh; the host follows bb-probe's exec and exits
                 break;
             default:
                 std::printf("GPU split: unknown event %u\n", r->type);

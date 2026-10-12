@@ -1,14 +1,14 @@
 /* Native arm64 GPU process, runtime side (docs/DESIGN_NATIVE_GPU_PROCESS.md, M2 and M3).
- * BB_GPU_PROCESS=1 on macOS: spawns out/bbgpu-host (arm64 slice), hands it the guest memory
+ * Default on macOS (BB_GPU_PROCESS=0 disables): spawns out/bbgpu-host (arm64 slice), hands it the guest memory
  * entry and a shared control block (host/bbgpu_protocol.h, host/bbgpu_shared.h) and mirrors
  * every guest view into it at the same address, through the control block's submit ring. Then
  * probe.c starts the renderer there (bbgpu_init_remote) and the GPU work follows on the same
  * ring. If the host fails before the renderer starts, this logs it and the runtime continues
  * single-process; after that, losing the host ends the game.
  *
- *   BB_GPU_PROCESS=1             enable
+ *   BB_GPU_PROCESS=0             disable (single process); on by default
  *   BB_GPU_HOST=path             host executable (default: bbgpu-host next to bb-probe)
- *   BB_GPU_PROCESS_VERIFY_MS=n   period of the mirror verification (default 5000; 0 = off)
+ *   BB_GPU_PROCESS_VERIFY_MS=n   period of the mirror verification (default 0 = off; e.g. 5000)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "gpu_process.h"
@@ -194,7 +194,7 @@ static long elapsed_ms(const struct timespec *start) {
 static void *monitor(void *unused) {
     (void)unused;
     const char *env = getenv("BB_GPU_PROCESS_VERIFY_MS");
-    const long verify_ms = env ? strtol(env, NULL, 10) : 5000;
+    const long verify_ms = env ? strtol(env, NULL, 10) : 0; /* a diagnostic: off by default */
     struct timespec last;
     clock_gettime(CLOCK_MONOTONIC, &last);
     unsigned rotate = 0;
@@ -312,8 +312,9 @@ void gpu_process_rendering(void) {
 }
 
 void gpu_process_start(void) {
+    /* On by default (macOS): BB_GPU_PROCESS=0 keeps everything in this process. */
     const char *env = getenv("BB_GPU_PROCESS");
-    if (!env || strcmp(env, "1")) return;
+    if (env && !strcmp(env, "0")) return;
     if (runtime_memory_create_pool() || runtime_memory_pool_entry() == MACH_PORT_NULL) {
         puts("GPU process: no shared guest memory entry (BB_SHARED_GUEST_MEMORY=0?); single-process");
         return;
