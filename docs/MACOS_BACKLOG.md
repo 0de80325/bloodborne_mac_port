@@ -11,6 +11,18 @@ Each item: what was done for now, what the refinement is, and where it lives.
 
 ## 1. Stability
 
+- **PARKED (2026-10-13): turning subpixel jitter on mid-game in split mode closes the game.**
+  The host exits with status 0 about 12 s later (the window loop's quit/close path; no error
+  logged), after a grey screen. Deterministic repro: `echo 33554432 > t.txt; BB_TOGGLE_FILE=$PWD/t.txt`
+  … load a save, then `echo 0 > t.txt` (toggle bit 25 = jitter off; the host now watches the toggle
+  file too). Image still correct 3 s after the toggle. Suspects: the upscaler reset path
+  (MetalFX/FSR history recreation) in the host; what posts SDL_EVENT_QUIT. Workaround: set jitter
+  in the menu, then restart the game.
+- **Shader/pipeline compile stutter on first sight of effects** (attacks, blood): compiles block the
+  frame. The pipeline cache was invalidated on 2026-10-12 (SRT walker format), so effects recompile
+  once. *Proper:* compile in the background with a fallback (skip the draw or use a generic
+  pipeline) as other emulators do.
+
 - **Shader-side buffer bounds checks (MoltenVK has no `robustBufferAccess2`).**
   *Now:* on macOS the device is created without `robustBufferAccess2`/`nullDescriptor`
   (`vk_instance.cpp`), and null buffer bindings use a small zero-filled dummy buffer

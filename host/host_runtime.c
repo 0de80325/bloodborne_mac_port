@@ -155,7 +155,31 @@ static __thread int32_t thread_errno;
 
 int32_t *runtime_errno(void) { return &thread_errno; }
 
+/* BB_TOGGLE_FILE: the renderer's optimization/debug toggles, re-read every 250 ms (as bb-probe
+ * does for its own side; the renderer runs here in split mode). */
+static void *toggle_watcher(void *path) {
+    for (unsigned long long last = ~0ULL;;) {
+        FILE *f = fopen(path, "r");
+        unsigned long long value = 0;
+        if (f) {
+            if (fscanf(f, "%llu", &value) != 1) value = 0;
+            fclose(f);
+        }
+        if (value != last) {
+            __atomic_store_n(&runtime_disabled_optimizations, (uint64_t)value, __ATOMIC_RELEASE);
+            say("disabled optimizations mask=%llu", value);
+            last = value;
+        }
+        struct timespec t = {0, 250000000};
+        nanosleep(&t, NULL);
+    }
+    return NULL;
+}
+
 void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalidate) {
+    const char *toggles = getenv("BB_TOGGLE_FILE");
+    static pthread_t watcher;
+    if (toggles && !watcher) pthread_create(&watcher, NULL, toggle_watcher, (void *)toggles);
     pthread_rwlock_wrlock(&table_lock);
     hook_map = map;
     hook_unmap = unmap;
