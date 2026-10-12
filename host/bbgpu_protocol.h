@@ -11,18 +11,17 @@
  *   3. bb-probe replies (to the host port) with SETUP: send rights to the pool memory entry and
  *      to a fresh control port (host -> runtime), plus the pool size and the guest range.
  *   4. bbgpu-host reserves the guest range, checks the entry, and sends READY on the control port.
- * Then: EVENTS (batched view map/unmap/protect, in the runtime's operation order) and VERIFY go
- * to the host port; VERIFY_REPLY comes back on the control port. Each side requests a dead-name
- * notification for the other's port, so either exits/falls back when the peer dies.
- * Mach messages from one sender to one port are delivered in order: an event batch sent before
- * a VERIFY is applied before it is answered. No shared-memory handoff is used in M2.
+ * Then (M3): view events, verification requests and all GPU work go through the submit ring of
+ * the shared control block (host/bbgpu_shared.h), in one order; VERIFY_REPLY still comes back on
+ * the control port. Each side requests a dead-name notification for the other's port, so either
+ * exits/falls back when the peer dies. (M2 sent EVENTS/VERIFY as Mach messages to the host port.)
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
 #include <mach/mach.h>
 #include <stdint.h>
 
-#define BBGPU_PROTOCOL_VERSION 1u
+#define BBGPU_PROTOCOL_VERSION 2u /* 2: shared control block entry in SETUP (M3) */
 #define BBGPU_GUEST_MIN UINT64_C(0x7000000000)
 #define BBGPU_GUEST_MAX UINT64_C(0xfc00000000)
 #define BBGPU_GUEST_PAGE UINT64_C(16384)
@@ -55,7 +54,7 @@ typedef struct {
 typedef struct {
     mach_msg_header_t h;
     mach_msg_body_t body;
-    mach_msg_port_descriptor_t entry, control;
+    mach_msg_port_descriptor_t entry, control, shared; /* shared: control block (bbgpu_shared.h) */
     uint32_t version, pid;
     uint64_t entry_size, guest_min, guest_max;
 } BbGpuSetup;

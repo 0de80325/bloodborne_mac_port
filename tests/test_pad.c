@@ -5,6 +5,7 @@
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
+const bool *bbgpu_split_keyboard(void) { return NULL; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;

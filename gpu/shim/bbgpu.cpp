@@ -11,6 +11,7 @@
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
 #include <cstring>
+#include <unistd.h>
 #include <mutex>
 #include <string>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <dispatch/dispatch.h>
 #endif
 #include "../bbgpu.h"
+#include "bbport_split.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
@@ -30,6 +32,7 @@
 #include "core/memory.h"
 #include "core/signals.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" {
@@ -49,10 +52,18 @@ void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, Ru
 }
 
 Frontend::WindowSDL* g_window = nullptr;
+extern std::unique_ptr<Vulkan::Presenter> presenter; // gnmdriver.cpp
 
-namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::GnmDriver {
+void RegisterLib(Core::Loader::SymbolsResolver* sym);
+bool BbSplitHost(const BbGpuRecord* record);
+} // namespace Libraries::GnmDriver
 namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
-namespace Libraries::VideoOut { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::VideoOut {
+void RegisterLib(Core::Loader::SymbolsResolver* sym);
+bool BbSplitHost(const BbGpuRecord* record);
+u64 BbSplitLabelAddress();
+} // namespace Libraries::VideoOut
 namespace Libraries::Kernel { void RegisterEventQueue(Core::Loader::SymbolsResolver* sym); }
 
 namespace {
@@ -100,6 +111,12 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
         });
 }
 void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
+    // bbport: in the split the copies to invalidate are the host's (AvPlayer frames, design P8).
+    if (BbSplit::Remote()) {
+        const BbGpuRange record{{BBGPU_REC_INVALIDATE, sizeof(BbGpuRange)}, address, size};
+        BbSplit::Push(&record);
+        return;
+    }
     if (rasterizer) rasterizer->InvalidateMemory(address, size);
 }
 u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
@@ -208,6 +225,8 @@ static void StartProfileWriter() {
 }
 #endif
 
+static void OpenWindow(const BbGpuConfig* config);
+
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
 #ifdef BB_PGO_GENERATE
@@ -216,6 +235,108 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     g_sdk_version = config->sdk_version;
     if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
     Core::Emulator::FillElfInfo(*config);
+    OpenWindow(config);
+    Core::Loader::SymbolsResolver resolver;
+    // GnmDriver creates the presenter that the VideoOut present thread uses.
+    Libraries::GnmDriver::RegisterLib(&resolver);
+    Libraries::VideoOut::RegisterLib(&resolver);
+    return 0;
+}
+
+extern "C" int bbgpu_host_start(const BbGpuConfig* config, void* shared) {
+    BbSplit::InitHost(static_cast<BbGpuShared*>(shared));
+    const int result = bbgpu_init(config);
+    if (result == 0) {
+        auto* s = static_cast<BbGpuShared*>(shared);
+        s->label_address = Libraries::VideoOut::BbSplitLabelAddress();
+        s->hdr_supported = presenter && presenter->IsHDRSupported() ? 1 : 0;
+        BbSplit::ForwardInterrupts();
+        // Keyboard for the game's pad emulation (input proper moves here in M5).
+        std::thread([s] {
+            Common::SetCurrentThreadName("bb:KeyBridge");
+            for (;;) {
+                int count = 0;
+                const bool* keys = SDL_GetKeyboardState(&count);
+                if (keys) {
+                    std::memcpy(s->keys, keys, std::min<size_t>(size_t(count), sizeof s->keys));
+                    __atomic_store_n(&s->keys_valid, 1u, __ATOMIC_RELEASE);
+                }
+                __atomic_store_n(&s->overlay_captures, BbOverlay::CapturesInput() ? 1u : 0u,
+                                 __ATOMIC_RELAXED);
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            }
+        }).detach();
+    }
+    return result;
+}
+
+extern "C" int bbgpu_host_dispatch(const void* record) {
+    const auto* r = static_cast<const BbGpuRecord*>(record);
+    if (r->type == BBGPU_REC_INVALIDATE) {
+        const auto* range = static_cast<const BbGpuRange*>(record);
+        Core::Memory::Instance()->InvalidateMemory(range->address, range->size);
+        return 1;
+    }
+    return Libraries::GnmDriver::BbSplitHost(r) || Libraries::VideoOut::BbSplitHost(r) ? 1 : 0;
+}
+
+extern "C" void bbgpu_split_attach(void* shared, int host_pid) {
+    auto* s = static_cast<BbGpuShared*>(shared);
+    s->host_pid = host_pid;
+    s->game_pid = getpid();
+    BbSplit::Attach(s);
+}
+
+extern "C" const bool* bbgpu_split_keyboard(void) {
+    if (!BbSplit::Remote() || !__atomic_load_n(&BbSplit::Shared()->keys_valid, __ATOMIC_ACQUIRE)) {
+        return nullptr;
+    }
+    static_assert(sizeof(bool) == 1);
+    return reinterpret_cast<const bool*>(BbSplit::Shared()->keys);
+}
+
+extern "C" void bbgpu_split_push(const void* record) {
+    BbSplit::Push(record);
+}
+
+extern "C" int bbgpu_init_remote(const BbGpuConfig* config, void* shared_block) {
+    auto* s = static_cast<BbGpuShared*>(shared_block);
+    BbSettings::Load();
+    g_sdk_version = config->sdk_version;
+    Core::Emulator::FillElfInfo(*config);
+    BbSplit::InitRemote(s);
+    std::snprintf(s->title, sizeof s->title, "%s", config->title ? config->title : "Bloodborne");
+    std::snprintf(s->serial, sizeof s->serial, "%s", config->serial ? config->serial : "UNKNOWN");
+    std::snprintf(s->user_dir, sizeof s->user_dir, "%s", config->user_dir ? config->user_dir : "user");
+    s->sdk_version = config->sdk_version;
+    s->psf_attributes = config->psf_attributes;
+    s->width = config->width;
+    s->height = config->height;
+    s->tsc_hz = runtime_tsc_frequency();
+    s->process_start_ns = 0; // the host's process clock: same CLOCK_MONOTONIC origin as ours
+    {
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        s->process_start_ns = u64(now.tv_sec) * 1'000'000'000ull + u64(now.tv_nsec) -
+                              runtime_process_time_counter();
+    }
+    BbGpuStart start{{BBGPU_REC_START, sizeof(BbGpuStart)}, 0, 0};
+    const s64 result = BbSplit::Request(&start, &start.slot);
+    if (result != 0) {
+        std::printf("GPU split: the GPU host could not start the renderer (%lld)\n",
+                    static_cast<long long>(result));
+        return -1;
+    }
+    Core::Loader::SymbolsResolver resolver;
+    Libraries::GnmDriver::RegisterLib(&resolver);
+    Libraries::VideoOut::RegisterLib(&resolver);
+    BbSplit::StartEventDispatcher();
+    std::printf("GPU split: rendering in the GPU host (labels at %#llx, HDR %s)\n",
+                static_cast<unsigned long long>(s->label_address), s->hdr_supported ? "yes" : "no");
+    return 0;
+}
+
+static void OpenWindow(const BbGpuConfig* config) {
     const std::string title = config->title ? config->title : "Bloodborne";
     const s32 width = config->width, height = config->height;
     auto window_loop = [title, width, height] {
@@ -248,11 +369,6 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });
     }
-    Core::Loader::SymbolsResolver resolver;
-    // GnmDriver creates the presenter that the VideoOut present thread uses.
-    Libraries::GnmDriver::RegisterLib(&resolver);
-    Libraries::VideoOut::RegisterLib(&resolver);
-    return 0;
 }
 
 namespace Libraries::Kernel { void StartKernelService(); }
@@ -287,6 +403,9 @@ extern "C" uint64_t bbgpu_get_flip_count(void) {
 }
 
 extern "C" uint64_t bbgpu_get_submit_count(void) {
+    if (BbSplit::Remote()) {
+        return __atomic_load_n(&BbSplit::Shared()->host_submits, __ATOMIC_RELAXED);
+    }
     return BbStats::submissions.load(std::memory_order_relaxed);
 }
 
@@ -389,6 +508,9 @@ ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
 
 extern "C" int bbgpu_overlay_captures_input(void) {
+    if (BbSplit::Remote()) {
+        return __atomic_load_n(&BbSplit::Shared()->overlay_captures, __ATOMIC_RELAXED) ? 1 : 0;
+    }
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 

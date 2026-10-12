@@ -766,7 +766,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                 continue;
             }
             runtime_fault_recover = &recover;
-            srt.walker_func(snapshot.user_data, flat.data());
+            Shader::RunSrtWalker(srt.walker_func, snapshot.user_data, flat.data());
             runtime_fault_recover = nullptr;
             if (std::memcmp(flat.data(), snapshot.flat, snapshot.flat_size * sizeof(u32)) != 0) {
                 u32 first = 0, count = 0;

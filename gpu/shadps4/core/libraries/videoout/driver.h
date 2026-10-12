@@ -95,6 +95,10 @@ public:
 
     bool SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop = false);
 
+    /// bbport: game side of the process split: a flip, queued end-of-pipe flip or vblank the
+    /// host reported (a BbGpuRecord from the event ring, host/bbgpu_shared.h).
+    void ApplyRemoteEvent(const void* record);
+
 private:
     struct Request {
         Vulkan::Frame* frame;

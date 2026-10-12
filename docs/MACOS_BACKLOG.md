@@ -47,6 +47,17 @@ Each item: what was done for now, what the refinement is, and where it lives.
   alias. *Refinement:* toggle protection (RW→RX) on executable aliases after host writes, if
   the game ever runs code from direct/flexible memory.
 
+- **GPU process split (M3, `BB_GPU_PROCESS=1`) gaps, until M4/M5.** *Now:* (a) no page
+  protection relay: the host never learns about CPU writes after a resource's first upload, and
+  GPU-written data is not downloaded when the game reads it (M4); (b) input: only the host
+  window's keyboard reaches the game (shared-block bridge); gamepads and IME text entry
+  (character naming) don't work in split mode (M5); (c) the overlay's Restart calls
+  `runtime_restart` in the host, which only logs; (d) losing the host after the renderer started
+  ends the game (no fallback). *Proper:* M4 protection/fault relay, M5 input/overlay/text in the
+  host with a shared pad block, restart of both processes (M6).
+- **SRT walker faulting loads stay zeroed for good** (upstream behaviour, kept in the portable
+  interpreter). *Proper:* zero only for the walk that faulted, if repeated faults are cheap enough.
+
 ## 2. Performance
 
 - **Render-pass breaks on a tile-based GPU (biggest lever, 2026-10-11).** Metal System Trace

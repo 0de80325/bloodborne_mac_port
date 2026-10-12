@@ -1,7 +1,7 @@
-/* Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md), runtime side. M2: spawns
- * out/bbgpu-host, hands it the guest memory entry and mirrors every guest view into it at the
- * same addresses; rendering still happens in this process. macOS only, opt-in with
- * BB_GPU_PROCESS=1; without it nothing here runs. */
+/* Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md), runtime side: spawns
+ * out/bbgpu-host, hands it the guest memory entry and the shared control block, mirrors every
+ * guest view into it at the same addresses; probe.c then starts the renderer there. macOS only,
+ * opt-in with BB_GPU_PROCESS=1; without it nothing here runs. */
 #pragma once
 #include <stdint.h>
 
@@ -10,6 +10,10 @@
 /* Starts the host (BB_GPU_PROCESS=1): spawn, handshake, then mirror guest views. Any failure is
  * logged and the runtime continues single-process. Call once, early, before guest maps. */
 void gpu_process_start(void);
+/* The shared control block while the host is up (for bbgpu_init_remote), else NULL. */
+void *gpu_process_shared(void);
+/* The renderer now runs in the host: from here on, losing the host ends the game. */
+void gpu_process_rendering(void);
 
 /* ---- runtime_memory.c side of the mirror ---- */
 enum { RUNTIME_MIRROR_MAP = 1, RUNTIME_MIRROR_UNMAP = 2, RUNTIME_MIRROR_PROTECT = 3 };

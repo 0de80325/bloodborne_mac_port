@@ -179,6 +179,19 @@ memory entry at the same addresses (0x7000000000–0xfc00000000) and mirrors all
 (4.8 GiB); 9 periodic checksum comparisons per run all match. Killing the host leaves the game
 running single-process. Without the variable nothing changes (same menu run, same warnings).
 
+### GPU process split (M3, 2026-10-12, without the game)
+
+Shared control block between `bb-probe` (x86-64/Rosetta) and `bbgpu-host` (arm64): a ring
+moves ~1.2 M variable-size records/s in order; a request/reply round trip averages 12.8 µs.
+With the real HLE functions in remote mode (`tests/test_gpu_split.c`, warm caches): renderer
+start in the host 0.23–0.38 s, `sceGnmSubmitDone` → host GpuIdle interrupt → submissions
+unlocked in 1.5–3 ms, a flip presented in 13.5–15 ms (≈ one 60 Hz vblank), vblanks at 62 Hz.
+Cold (no pipeline cache) the first flip took 3 s, and the present thread then caught up on the
+vblanks it missed in a burst (existing behaviour, not split-specific).
+
+**Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
+hours (new x86 processes hung in state U); it recovered on its own.
+
 ## Part 3 — Open issues
 
 | Issue | Status |

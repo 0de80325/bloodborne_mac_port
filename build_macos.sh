@@ -65,18 +65,19 @@ fi
 cflags=(-std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${ARCH[@]}")
 "$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" src/gpu_process.c src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -framework CoreFoundation -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
-# Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md; BB_GPU_PROCESS=1). Its window
-# needs the arm64 SDL3 from deps/arm64 (scripts/macos/bootstrap_deps.sh); without it the host
-# builds with no window.
+# Native arm64 GPU process (docs/DESIGN_NATIVE_GPU_PROCESS.md; BB_GPU_PROCESS=1): the GPU
+# library built arm64 (scripts/macos/build_gpu_arm64.sh, needs deps/arm64 from
+# BB_DEPS_ARCH=arm64 scripts/macos/bootstrap_deps.sh) linked into out/bbgpu-host.
 ARM64_PREFIX=$ROOT/deps/arm64
-host_flags=()
 if [[ -f $ARM64_PREFIX/lib/pkgconfig/sdl3.pc ]]; then
-    read -r -a host_flags <<< "$(PKG_CONFIG_LIBDIR=$ARM64_PREFIX/lib/pkgconfig pkg-config --cflags --libs sdl3)"
-    host_flags+=(-DBBGPU_HOST_SDL=1 -Wl,-rpath,"$ARM64_PREFIX/lib")
+    bash scripts/macos/build_gpu_arm64.sh
+    /usr/bin/clang -arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c11 -O2 -g -Wall -Wextra -Werror \
+        -I. host/main.c host/host_runtime.c -Lout/gpu-arm64 -lbbgpu -Wl,-rpath,"$ROOT/out/gpu-arm64" \
+        -Wl,-rpath,"$ARM64_PREFIX/lib" -framework CoreFoundation -o out/bbgpu-host
+    echo "Built $PWD/out/bbgpu-host (arm64, renderer: out/gpu-arm64/libbbgpu.dylib)"
+else
+    echo "Skipped out/bbgpu-host: no arm64 dependencies (BB_DEPS_ARCH=arm64 bash scripts/macos/bootstrap_deps.sh)"
 fi
-/usr/bin/clang -arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c11 -O2 -g -Wall -Wextra -Werror \
-    host/main.c "${host_flags[@]}" -o out/bbgpu-host
-echo "Built $PWD/out/bbgpu-host (arm64, window: $([[ ${#host_flags[@]} -gt 0 ]] && echo SDL3 || echo none))"
 # GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
 "$CC" -std=c11 -O2 -Wall -Wextra -Werror "${ARCH[@]}" "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" \
     -Wl,-rpath,"$PREFIX/lib" -o out/bb-gpu-capabilities
@@ -91,4 +92,22 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" "${cflags[@]}" -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # Shared control block rings between bb-probe (x86-64) and bbgpu-host (arm64).
+    /usr/bin/clang -arch x86_64 -arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c11 -O2 -g \
+        -Wall -Wextra -Werror -I. tests/test_bbgpu_rings.c -o out/bbgpu-rings-test
+    arch -x86_64 out/bbgpu-rings-test
+    # The GPU process split end to end (opens the host's window for a moment).
+    if [[ -x out/bbgpu-host ]]; then
+        "$CC" "${cflags[@]}" "${includes[@]}" -I. -Isrc tests/test_gpu_split.c "${runtime[@]}" src/gpu_process.c \
+            out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/gpu-split-test
+        out/gpu-split-test
+    fi
+    # Portable SRT walker, on both architectures (arm64 when build_gpu_arm64.sh has run).
+    for walker in "x86_64:out/gpu" "arm64:out/gpu-arm64"; do
+        [[ -f ${walker#*:}/libbbgpu.dylib ]] || continue
+        /usr/bin/clang++ -arch "${walker%%:*}" -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c++20 -O2 -g \
+            -Wall -Wextra -Werror tests/test_srt_walker.cpp -L"${walker#*:}" -lbbgpu \
+            -Wl,-rpath,"$ROOT/${walker#*:}" -o "out/srt-walker-test-${walker%%:*}"
+        "out/srt-walker-test-${walker%%:*}"
+    done
 fi

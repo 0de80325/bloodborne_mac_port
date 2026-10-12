@@ -772,6 +772,13 @@ int main(int argc, char **argv) {
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
+#ifdef __APPLE__
+        void *split=gpu_process_shared();
+        if (split) {
+            if (bbgpu_init_remote(&gpu,split)) fail("GPU initialization in the GPU host failed");
+            gpu_process_rendering();
+        } else
+#endif
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
     }

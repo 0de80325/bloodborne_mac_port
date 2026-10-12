@@ -1,23 +1,20 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 #include <boost/container/flat_map.hpp>
 #include <queue>
-#include "common/arch.h"
-#ifdef ARCH_X86_64
-// bbport: the SRT walker is JIT-compiled x86-64 code (Xbyak, disassembled/patched with Zydis);
-// the native arm64 GPU host builds without both (see the #else branch at the end).
-#include <xbyak/xbyak.h>
-#include <xbyak/xbyak_util.h>
-#include "common/decoder.h"
-#endif
+#include "bbport_threads.h"
 #include "common/io_file.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
-#include "common/signal_context.h"
 #include "core/emulator_settings.h"
-#include "core/signals.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
@@ -27,34 +24,123 @@
 #include "shader_recompiler/ir/srt_gvn_table.h"
 #include "shader_recompiler/ir/value.h"
 
-#ifdef ARCH_X86_64
-
-#include <mutex>
-
-using namespace Xbyak::util;
-
-static Xbyak::CodeGenerator g_srt_codegen(32_MB);
-static const u8* g_srt_codegen_start = nullptr;
-
-namespace {
-void EnsureSrtFaultHandler();
-}
-
-namespace Shader {
-
-PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
-    EnsureSrtFaultHandler();
-    const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
-    g_srt_codegen.db(ptr, size);
-    g_srt_codegen.ready();
-    return func_addr;
-}
-
-} // namespace Shader
+// bbport: upstream JIT-compiles the SRT walker to x86-64 (Xbyak) and patches loads that fault
+// into "zero the register" (Zydis, SIGSEGV handler). Here the walker is a portable bytecode run
+// by an interpreter, on x86-64 and on the native arm64 GPU host alike. A load that faults is
+// marked zeroed permanently, as the patch did; the fault returns through runtime_fault_recover.
+// Instructions are three words: opcode (bit 31 = zeroed load), a, b. Offsets are in dwords.
 
 namespace {
 
-static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t codesize) {
+constexpr u32 SrtMagic = 0x31545253; // "SRT1"
+constexpr u32 SrtZeroed = 1u << 31;
+constexpr u32 SrtMaxStack = 64;
+
+enum class SrtOp : u32 {
+    End,
+    Imm,         // push a
+    LoadFlat,    // push flat[a] (user data registers and already-flattened values)
+    Add,
+    Sub,
+    Mul,
+    Shl,
+    Shr,
+    And,
+    Or,
+    Xor,
+    Not,
+    UMin,
+    UMax,
+    Bfe,         // pop count, offset, base: (base >> offset) & mask(count)
+    PushPtrImm,  // push the current pointer; pointer = *(u64*)(pointer + a * 4) & 48 bits
+    PushPtrExpr, // as PushPtrImm with a popped offset
+    CopyImm,     // flat[b] = *(u32*)(pointer + a * 4)
+    CopyExpr,    // flat[b] = *(u32*)(pointer + popped offset * 4)
+    PopPtr,
+};
+
+constexpr const char* SrtOpName(SrtOp op) {
+    constexpr const char* names[] = {"end", "imm", "load_flat", "add", "sub", "mul", "shl",
+                                     "shr", "and", "or", "xor", "not", "umin", "umax", "bfe",
+                                     "push_ptr_imm", "push_ptr_expr", "copy_imm", "copy_expr",
+                                     "pop_ptr"};
+    return static_cast<u32>(op) < std::size(names) ? names[static_cast<u32>(op)] : "?";
+}
+
+std::mutex g_walker_mutex;
+std::deque<std::unique_ptr<u32[]>> g_walkers;
+
+/// Whether a program is well formed and stays within the interpreter's stacks.
+bool CheckProgram(const u32* code, size_t words) {
+    if (words < 4 || code[0] != SrtMagic || (words - 1) % 3 != 0) {
+        return false;
+    }
+    int values = 0, ptrs = 0;
+    for (size_t i = 1; i < words; i += 3) {
+        const auto op = static_cast<SrtOp>(code[i] & ~SrtZeroed);
+        switch (op) {
+        case SrtOp::End:
+            return i + 3 == words && values == 0 && ptrs == 0;
+        case SrtOp::Imm:
+        case SrtOp::LoadFlat:
+            ++values;
+            break;
+        case SrtOp::Not:
+            if (values < 1) {
+                return false;
+            }
+            break;
+        case SrtOp::Bfe:
+            if (values < 3) {
+                return false;
+            }
+            values -= 2;
+            break;
+        case SrtOp::PushPtrImm:
+            ++ptrs;
+            break;
+        case SrtOp::PushPtrExpr:
+            --values;
+            ++ptrs;
+            break;
+        case SrtOp::CopyImm:
+            break;
+        case SrtOp::CopyExpr:
+            --values;
+            break;
+        case SrtOp::PopPtr:
+            --ptrs;
+            break;
+        default:
+            if (op > SrtOp::PopPtr || values < 2) {
+                return false;
+            }
+            --values; // binary operators
+            break;
+        }
+        if (values < 0 || ptrs < 0 || values > int(SrtMaxStack) || ptrs > int(SrtMaxStack)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+Shader::SrtWalkerCode StoreWalker(const u32* code, size_t words) {
+    ASSERT_MSG(CheckProgram(code, words), "Malformed SRT walker program");
+    auto copy = std::make_unique<u32[]>(words);
+    std::memcpy(copy.get(), code, words * sizeof(u32));
+    std::scoped_lock lock{g_walker_mutex};
+    return g_walkers.emplace_back(std::move(copy)).get();
+}
+
+template <typename T>
+T LoadGuest(u64 address) {
+    T value;
+    std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(T));
+    return value;
+}
+
+void DumpSrtProgram(const Shader::Info& info, const u32* code, size_t words) {
     using namespace Common::FS;
 
     const auto dump_dir = GetUserPath(PathType::ShaderDir) / "dumps";
@@ -63,92 +149,130 @@ static void DumpSrtProgram(const Shader::Info& info, const u8* code, size_t code
     }
     const auto filename = fmt::format("{}_{:#018x}.srtprogram.txt", info.hw_stage, info.pgm_hash);
     const auto file = IOFile{dump_dir / filename, FileAccessMode::Create, FileType::TextFile};
-
-    u64 address = reinterpret_cast<u64>(code);
-    u64 code_end = address + codesize;
-    ZydisDecodedInstruction instruction;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    ZyanStatus status = ZYAN_STATUS_SUCCESS;
-    while (address < code_end && ZYAN_SUCCESS(Common::Decoder::Instance()->decodeInstruction(
-                                     instruction, operands, reinterpret_cast<void*>(address)))) {
-        std::string s =
-            Common::Decoder::Instance()->disassembleInst(instruction, operands, address);
-        s += "\n";
-        file.WriteString(s);
-        address += instruction.length;
+    for (size_t i = 1; i + 2 < words; i += 3) {
+        file.WriteString(fmt::format("{:4}: {} {} {}\n", (i - 1) / 3,
+                                     SrtOpName(static_cast<SrtOp>(code[i] & ~SrtZeroed)),
+                                     code[i + 1], code[i + 2]));
     }
 }
 
-static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
-    // Only handle if the fault address is within the SRT code range
-    const u8* code_start = g_srt_codegen_start;
-    const u8* code_end = code_start + g_srt_codegen.getSize();
-    const void* code = Common::GetRip(context);
-    if (code < code_start || code >= code_end) {
-        return false; // Not in SRT code range
-    }
+} // namespace
 
-    // bbport: draw-preparation workers run the same walker concurrently; a second thread that
-    // faulted on the instruction before the first one patched it finds the patch and retries.
-    static std::mutex patch_mutex;
-    std::scoped_lock patch_lock{patch_mutex};
-    const u8* bytes = reinterpret_cast<const u8*>(code);
-    if ((bytes[0] == 0x48 && bytes[1] == 0x31 && bytes[2] == 0xFF) ||
-        (bytes[0] == 0x45 && bytes[1] == 0x31 && bytes[2] == 0xD2)) {
-        return true;
-    }
+namespace Shader {
 
-    // Patch instruction to zero register
-    ZydisDecodedInstruction instruction;
-    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-    ZyanStatus status = Common::Decoder::Instance()->decodeInstruction(instruction, operands,
-                                                                       const_cast<void*>(code), 15);
-
-    ASSERT(ZYAN_SUCCESS(status) && instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-           operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-           operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
-
-    size_t len = instruction.length;
-    const size_t patch_size = 3;
-    u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
-
-    // We can only encounter rdi or r10d as the first operand in a
-    // fault memory access for SRT walker.
-    switch (operands[0].reg.value) {
-    case ZYDIS_REGISTER_RDI:
-        // mov rdi, [rdi + (off_dw << 2)] -> xor rdi, rdi
-        code_patch[0] = 0x48;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xFF;
-        break;
-    case ZYDIS_REGISTER_R10D:
-        // mov r10d, [rdi + (off_dw << 2)] -> xor r10d, r10d
-        code_patch[0] = 0x45;
-        code_patch[1] = 0x31;
-        code_patch[2] = 0xD2;
-        break;
-    default:
-        UNREACHABLE_MSG("Unsupported register for SRT walker patch");
-        return false;
-    }
-
-    // Fill nops
-    memset(code_patch + patch_size, 0x90, len - patch_size);
-
-    LOG_WARNING(Render_Recompiler, "Patched SRT walker at {}, fault address {}", code,
-                fault_address);
-
-    return true;
+SrtWalkerCode RegisterWalkerCode(const u8* ptr, size_t size) {
+    ASSERT(size % sizeof(u32) == 0);
+    std::vector<u32> code(size / sizeof(u32));
+    std::memcpy(code.data(), ptr, size);
+    return StoreWalker(code.data(), code.size());
 }
 
-void EnsureSrtFaultHandler() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        g_srt_codegen_start = g_srt_codegen.getCurr();
-        constexpr u32 priority = 1;
-        Core::Signals::Instance()->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    });
+void RunSrtWalker(SrtWalkerCode code, const u32* user_data, u32* flat) {
+    // Reads through guest pointers may fault (stale or unmapped tables): the faulting load is
+    // marked zeroed for good and the walk restarts. It only reads guest memory and rewrites
+    // the same flat words, so restarting is safe; each restart zeroes one more load.
+    u32* const ops = const_cast<u32*>(code) + 1;
+    BbRecoverBuf* const outer = runtime_fault_recover;
+    volatile u32 pc = 0;
+    BbRecoverBuf recover;
+    if (BB_RECOVER_SET(recover)) {
+        std::atomic_ref<u32>(ops[pc]).fetch_or(SrtZeroed, std::memory_order_relaxed);
+        LOG_WARNING(Render_Recompiler, "SRT walker load {} faulted; it now reads zero", pc / 3);
+    }
+    runtime_fault_recover = &recover;
+
+    u32 values[SrtMaxStack];
+    u64 ptrs[SrtMaxStack];
+    u32 nv = 0, np = 0;
+    u64 cur = reinterpret_cast<u64>(user_data);
+    for (u32 i = 0;; i += 3) {
+        const u32 word = std::atomic_ref<u32>(ops[i]).load(std::memory_order_relaxed);
+        const bool zeroed = word & SrtZeroed;
+        const auto op = static_cast<SrtOp>(word & ~SrtZeroed);
+        const u32 a = ops[i + 1], b = ops[i + 2];
+        u32 rhs;
+        switch (op) {
+        case SrtOp::End:
+            runtime_fault_recover = outer;
+            return;
+        case SrtOp::Imm:
+            values[nv++] = a;
+            continue;
+        case SrtOp::LoadFlat:
+            values[nv++] = flat[a];
+            continue;
+        case SrtOp::Not:
+            values[nv - 1] = ~values[nv - 1];
+            continue;
+        case SrtOp::Bfe: {
+            const u32 count = values[--nv], offset = values[--nv];
+            const u32 mask = count >= 32 ? ~0u : (1u << count) - 1;
+            values[nv - 1] = (values[nv - 1] >> (offset & 31)) & mask;
+            continue;
+        }
+        case SrtOp::PushPtrImm:
+        case SrtOp::PushPtrExpr: {
+            const u32 off = op == SrtOp::PushPtrImm ? a : values[--nv];
+            ptrs[np++] = cur;
+            pc = i;
+            cur = zeroed ? 0 : LoadGuest<u64>(cur + u32(off << 2)) & 0xFFFFFFFFFFFFULL;
+            continue;
+        }
+        case SrtOp::CopyImm:
+        case SrtOp::CopyExpr: {
+            const u32 off = op == SrtOp::CopyImm ? a : values[--nv];
+            pc = i;
+            flat[b] = zeroed ? 0 : LoadGuest<u32>(cur + u32(off << 2));
+            continue;
+        }
+        case SrtOp::PopPtr:
+            cur = ptrs[--np];
+            continue;
+        default:
+            break;
+        }
+        rhs = values[--nv];
+        u32& lhs = values[nv - 1];
+        switch (op) {
+        case SrtOp::Add:
+            lhs += rhs;
+            break;
+        case SrtOp::Sub:
+            lhs -= rhs;
+            break;
+        case SrtOp::Mul:
+            lhs *= rhs;
+            break;
+        case SrtOp::Shl:
+            lhs <<= rhs & 31;
+            break;
+        case SrtOp::Shr:
+            lhs >>= rhs & 31;
+            break;
+        case SrtOp::And:
+            lhs &= rhs;
+            break;
+        case SrtOp::Or:
+            lhs |= rhs;
+            break;
+        case SrtOp::Xor:
+            lhs ^= rhs;
+            break;
+        case SrtOp::UMin:
+            lhs = std::min(lhs, rhs);
+            break;
+        case SrtOp::UMax:
+            lhs = std::max(lhs, rhs);
+            break;
+        default:
+            UNREACHABLE_MSG("Bad SRT walker opcode {}", static_cast<u32>(op));
+        }
+    }
 }
+
+} // namespace Shader
+
+namespace {
 
 using namespace Shader;
 
@@ -247,271 +371,34 @@ static inline void SetFlatbufOffset(IR::Inst* inst, u16 offset) {
     UNREACHABLE_MSG("Instruction not supported");
 }
 
-static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                          const IR::Value& off_dw);
+using Code = std::vector<u32>;
+
+static void Emit(Code& c, SrtOp op, u32 a = 0, u32 b = 0) {
+    c.insert(c.end(), {static_cast<u32>(op), a, b});
+}
+
+static bool ComputeOffset(Code& c, PassInfo& pass_info, const IR::Value& off_dw);
 
 #define ABORT_ON_FAILURE(expr)                                                                     \
     if (!(expr)) {                                                                                 \
         return false;                                                                              \
     }
 
-#define POP_ABORT_ON_FAILURE(expr)                                                                 \
-    if (!(expr)) {                                                                                 \
-        c.add(rsp, 8);                                                                             \
-        return false;                                                                              \
+static bool EmitOperand(Code& c, PassInfo& pass_info, const IR::Value& value) {
+    if (value.IsImmediate()) {
+        Emit(c, SrtOp::Imm, value.U32());
+        return true;
     }
-
-static bool EmitComputeOffsetIAdd32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                                    IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.add(reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.add(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.add(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
+    return ComputeOffset(c, pass_info, value);
 }
 
-static bool EmitComputeOffsetISub32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                                    IR::Inst* inst) {
+// Operands are pushed in argument order; the operator combines them as arg0 op arg1.
+static bool EmitOperator(Code& c, PassInfo& pass_info, IR::Inst* inst, SrtOp op) {
     ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.neg(reg);
-        c.add(reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.sub(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.neg(reg);
-        c.add(reg, dword[rsp]);
-        c.add(rsp, 8);
+    for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+        ABORT_ON_FAILURE(EmitOperand(c, pass_info, inst->Arg(arg)));
     }
-    return true;
-}
-
-static bool EmitComputeOffsetIMul32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                                    IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.imul(reg, reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.imul(reg, reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.imul(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetShiftLeftLogical32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                                PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.shl(reg, inst->Arg(0).U32());
-        c.mov(ecx, reg);
-        c.mov(reg, inst->Arg(0).U32());
-        c.shl(reg, cl);
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.shl(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.pop(rcx);
-        c.shl(reg, cl);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetShiftRightLogical32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                                 PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.mov(ecx, reg);
-        c.mov(reg, inst->Arg(0).U32());
-        c.shr(reg, cl);
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.shr(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.pop(rcx);
-        c.shr(reg, cl);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetBitwiseAnd32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                          PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.and_(reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.and_(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.and_(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetBitwiseOr32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                         PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.or_(reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.or_(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.or_(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetBitwiseXor32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                          PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.xor_(reg, inst->Arg(0).U32());
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.xor_(reg, inst->Arg(1).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.xor_(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetBitwiseNot32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                          PassInfo& pass_info, IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-    c.not_(reg);
-    return true;
-}
-
-static bool EmitComputeOffsetUMin32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                                    IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.mov(ecx, inst->Arg(0).U32());
-        c.cmp(reg, ecx);
-        c.cmova(reg, ecx);
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.mov(ecx, inst->Arg(1).U32());
-        c.cmp(reg, ecx);
-        c.cmova(reg, ecx);
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.cmp(reg, dword[rsp]);
-        c.cmova(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetUMax32(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                                    IR::Inst* inst) {
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.mov(ecx, inst->Arg(0).U32());
-        c.cmp(reg, ecx);
-        c.cmovb(reg, ecx);
-    } else if (inst->Arg(1).IsImmediate()) {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.mov(ecx, inst->Arg(1).U32());
-        c.cmp(reg, ecx);
-        c.cmovb(reg, ecx);
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-        c.push(reg.cvt64());
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.cmp(reg, dword[rsp]);
-        c.cmovb(reg, dword[rsp]);
-        c.add(rsp, 8);
-    }
-    return true;
-}
-
-static bool EmitComputeOffsetBitFieldUExtract(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg,
-                                              PassInfo& pass_info, IR::Inst* inst) {
-    // We asume that the count is always less than 32, Is this correct?
-    ASSERT(!inst->AreAllArgsImmediates());
-    if (inst->Arg(0).IsImmediate()) {
-        c.mov(reg, inst->Arg(0).U32());
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(0)));
-    }
-    bool in_stack = false;
-    if (inst->Arg(1).IsImmediate()) {
-        c.shr(reg, inst->Arg(1).U32());
-    } else {
-        c.push(reg.cvt64());
-        in_stack = true;
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(1)));
-        c.mov(ecx, reg);
-        c.shr(dword[rsp], cl);
-    }
-    if (inst->Arg(2).IsImmediate()) {
-        if (in_stack) {
-            c.pop(reg.cvt64());
-        }
-        c.and_(reg, (1U << inst->Arg(2).U32()) - 1);
-    } else {
-        if (!in_stack) {
-            c.push(reg.cvt64());
-        }
-        POP_ABORT_ON_FAILURE(ComputeOffset(c, reg, pass_info, inst->Arg(2)));
-        c.mov(ecx, reg);
-        c.mov(edx, 1);
-        c.shl(edx, cl);
-        c.dec(edx);
-        c.and_(dword[rsp], edx);
-        c.pop(reg.cvt64());
-    }
+    Emit(c, op);
     return true;
 }
 
@@ -538,57 +425,43 @@ static bool IsAllowedOffsetInstruction(const IR::Inst* inst) {
     }
 }
 
-static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
-                          const IR::Value& off_dw) {
-    ASSERT(reg != ecx && reg != edx);
+static bool ComputeOffset(Code& c, PassInfo& pass_info, const IR::Value& off_dw) {
     auto inst = off_dw.Inst();
     switch (inst->GetOpcode()) {
     case IR::Opcode::GetUserData:
-        c.mov(reg, ptr[rsi + (static_cast<u32>(inst->Arg(0).ScalarReg()) << 2)]);
+        Emit(c, SrtOp::LoadFlat, static_cast<u32>(inst->Arg(0).ScalarReg()));
         return true;
     case IR::Opcode::ReadConst:
     case IR::Opcode::ReadConstBuffer:
         if (u16 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)); offset != 0) {
-            c.mov(reg, ptr[rsi + (offset << 2)]);
+            Emit(c, SrtOp::LoadFlat, offset);
             return true;
         }
         return false;
     case IR::Opcode::IAdd32:
-        ABORT_ON_FAILURE(EmitComputeOffsetIAdd32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Add);
     case IR::Opcode::ISub32:
-        ABORT_ON_FAILURE(EmitComputeOffsetISub32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Sub);
     case IR::Opcode::IMul32:
-        ABORT_ON_FAILURE(EmitComputeOffsetIMul32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Mul);
     case IR::Opcode::ShiftLeftLogical32:
-        ABORT_ON_FAILURE(EmitComputeOffsetShiftLeftLogical32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Shl);
     case IR::Opcode::ShiftRightLogical32:
-        ABORT_ON_FAILURE(EmitComputeOffsetShiftRightLogical32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Shr);
     case IR::Opcode::BitwiseAnd32:
-        ABORT_ON_FAILURE(EmitComputeOffsetBitwiseAnd32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::And);
     case IR::Opcode::BitwiseOr32:
-        ABORT_ON_FAILURE(EmitComputeOffsetBitwiseOr32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Or);
     case IR::Opcode::BitwiseXor32:
-        ABORT_ON_FAILURE(EmitComputeOffsetBitwiseXor32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Xor);
     case IR::Opcode::BitwiseNot32:
-        ABORT_ON_FAILURE(EmitComputeOffsetBitwiseNot32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Not);
     case IR::Opcode::UMin32:
-        ABORT_ON_FAILURE(EmitComputeOffsetUMin32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::UMin);
     case IR::Opcode::UMax32:
-        ABORT_ON_FAILURE(EmitComputeOffsetUMax32(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::UMax);
     case IR::Opcode::BitFieldUExtract:
-        ABORT_ON_FAILURE(EmitComputeOffsetBitFieldUExtract(c, reg, pass_info, inst));
-        return true;
+        return EmitOperator(c, pass_info, inst, SrtOp::Bfe);
     default:
         LOG_ERROR(Render_Recompiler, "Unexpected instruction for offset computation, {}",
                   magic_enum::enum_name(inst->GetOpcode()));
@@ -596,34 +469,27 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     }
 }
 
-static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw) {
-    c.push(rdi);
-    if (off_dw.IsImmediate()) {
-        c.mov(rdi, ptr[rdi + (off_dw.U32() << 2)]);
-    } else {
-        ABORT_ON_FAILURE(ComputeOffset(c, r10d, pass_info, off_dw));
-        c.shl(r10d, 2);
-        c.mov(r10d, r10d);
-        c.mov(rdi, ptr[rdi + r10]);
-    }
-    c.mov(r10, 0xFFFFFFFFFFFFULL);
-    c.and_(rdi, r10);
+// An offset expression is built aside and appended only when complete.
+static bool EmitOffset(Code& c, PassInfo& pass_info, const IR::Value& off_dw) {
+    Code expr;
+    ABORT_ON_FAILURE(ComputeOffset(expr, pass_info, off_dw));
+    c.insert(c.end(), expr.begin(), expr.end());
     return true;
 }
 
-static inline void PopPtr(Xbyak::CodeGenerator& c) {
-    c.pop(rdi);
-}
-
 static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& pass_info,
-                         Xbyak::CodeGenerator& c) {
+                         Code& c) {
     if (subtree->GetOpcode() == IR::Opcode::ReadConst && subtree->Flags<u16>() == 0 ||
         subtree->GetOpcode() == IR::Opcode::ReadConstBuffer &&
             subtree->Flags<IR::BufferInstInfo>().flatbuf_off_dw == 0) {
         return;
     }
 
-    if (!PushPtr(c, pass_info, off_dw)) {
+    if (off_dw.IsImmediate()) {
+        Emit(c, SrtOp::PushPtrImm, off_dw.U32());
+    } else if (EmitOffset(c, pass_info, off_dw)) {
+        Emit(c, SrtOp::PushPtrExpr);
+    } else {
         LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
         return;
     }
@@ -633,21 +499,15 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // First copy all the src data from this tree level
     // That way, all data that was contiguous in the guest SRT is also contiguous in the
     // flattened buffer.
-    // TODO src and dst are contiguous. Optimize with wider loads/stores
-    // TODO if this subtree is dynamically indexed, don't compact it (keep it sparse)
     for (auto [src_off_dw, use] : *use_list) {
         if (src_off_dw.IsImmediate()) {
-            c.mov(r10d, ptr[rdi + (src_off_dw.U32() << 2)]);
+            Emit(c, SrtOp::CopyImm, src_off_dw.U32(), pass_info.dst_off_dw);
+        } else if (EmitOffset(c, pass_info, src_off_dw)) {
+            Emit(c, SrtOp::CopyExpr, 0, pass_info.dst_off_dw);
         } else {
-            if (!ComputeOffset(c, r10d, pass_info, src_off_dw)) {
-                LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
-                continue;
-            }
-            c.shl(r10d, 2);
-            c.mov(r10d, r10d);
-            c.mov(r10d, dword[rdi + r10]);
+            LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
+            continue;
         }
-        c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
 
         SetFlatbufOffset(use, pass_info.dst_off_dw);
         pass_info.dst_off_dw++;
@@ -660,36 +520,28 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         }
     }
 
-    PopPtr(c);
+    Emit(c, SrtOp::PopPtr);
 }
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
-    Xbyak::CodeGenerator& c = g_srt_codegen;
-
     if (pass_info.srt_roots.empty()) {
         return;
     }
 
-    // Register the signal handler for SRT walker, if not already registered
-    EnsureSrtFaultHandler();
-
-    info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
+    Code c{SrtMagic};
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
     ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
 
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
         VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, c);
     }
+    Emit(c, SrtOp::End);
 
-    c.ret();
-    c.ready();
-
-    info.srt_info.walker_func_size =
-        c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    info.srt_info.walker_func = StoreWalker(c.data(), c.size());
+    info.srt_info.walker_func_size = c.size() * sizeof(u32);
 
     if (EmulatorSettings.IsDumpShaders()) {
-        DumpSrtProgram(info, reinterpret_cast<const u8*>(info.srt_info.walker_func),
-                       info.srt_info.walker_func_size);
+        DumpSrtProgram(info, c.data(), c.size());
     }
 
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
@@ -883,23 +735,3 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
 }
 
 } // namespace Shader::Optimization
-
-#else
-
-namespace Shader {
-
-PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
-    UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
-}
-
-namespace Optimization {
-
-void FlattenExtendedUserdataPass(IR::Program& program) {
-    UNREACHABLE_MSG("FlattenExtendedUserdataPass unimplemented for target architecture.");
-}
-
-} // namespace Optimization
-
-} // namespace Shader
-
-#endif

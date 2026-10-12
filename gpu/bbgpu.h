@@ -2,6 +2,7 @@
  * GnmDriver, VideoOut and kernel event queues, adapted to the native loader. */
 #ifndef BBGPU_H
 #define BBGPU_H
+#include <stdbool.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,25 @@ typedef struct {
     uint32_t psf_attributes;    /* param.sfo ATTRIBUTE */
     int32_t width, height;      /* initial window size */
 } BbGpuConfig;
+/* ---- Two-process split (docs/DESIGN_NATIVE_GPU_PROCESS.md, M3; shared: host/bbgpu_shared.h) ----
+ * Game side (bb-probe): instead of bbgpu_init. Writes the configuration into the shared control
+ * block, starts the renderer in the GPU host (waits for it), then registers GnmDriver/VideoOut
+ * with the work forwarded to the host. 0 on success. */
+int bbgpu_init_remote(const BbGpuConfig *config, void *shared);
+/* GPU host (bbgpu-host): creates the window, Vulkan device, presenter and command processor
+ * here, publishes host facts in the shared block and forwards GPU interrupts. 0 on success. */
+int bbgpu_host_start(const BbGpuConfig *config, void *shared);
+/* GPU host: runs one GnmDriver/VideoOut record from the submit ring (answers requests itself).
+ * 0 when the record type is not the GPU library's. */
+int bbgpu_host_dispatch(const void *record);
+/* Game side: attaches the shared control block (before any push) and pushes one record onto
+ * its submit ring. The runtime's view mirror and the GPU library share this one ordered
+ * producer, so memory is mapped in the host before work that uses it. */
+void bbgpu_split_attach(void *shared, int host_pid);
+void bbgpu_split_push(const void *record);
+/* Game side: the host window's keyboard state (SDL scancode-indexed, 512 entries) while the
+ * renderer runs in the GPU host, else NULL. */
+const bool *bbgpu_split_keyboard(void);
 /* Registers kernel event queues (needed with or without graphics). */
 void bbgpu_register_kernel(void);
 /* Creates window, Vulkan device, presenter and GPU command processor. */

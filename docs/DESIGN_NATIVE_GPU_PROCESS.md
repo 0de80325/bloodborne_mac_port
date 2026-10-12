@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **M0 spike passed — GO; M1 and M2 done** (2026-10-12); M3 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0 spike passed — GO; M1 and M2 done; M3 implemented, in-game test pending** (2026-10-12). Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 
@@ -160,6 +160,56 @@ The host's own views stay writable: protection only matters where the game runs.
 | M5 | Input, overlay, text input in the host | Fully playable |
 | M6 | AvPlayer, restart, crash handling, diagnostics | Feature parity with single-process |
 | M7 | Zero-copy textures/buffers from shared memory; remove the 16 GiB arena | Lower memory, fewer copies; benchmark |
+
+## M3 plan (2026-10-12)
+
+**Prerequisite done:** the SRT walker is portable bytecode run by an interpreter on both
+architectures (`flatten_extended_userdata_pass.cpp`, `tests/test_srt_walker.cpp`); a load that
+faults is zeroed once, through `runtime_fault_recover`. Pipeline cache versions bumped.
+
+**Shared control block** (`host/bbgpu_shared.h`): a second, small Mach memory entry (not guest
+memory, mapped anywhere on each side, offsets only). Holds the launch configuration and timebase
+(game → host), host facts (label address, HDR support), request reply slots, and two byte rings
+of 8-byte-aligned records with release/acquire indices and `os_sync_wait_on_address(SHARED)`
+doorbells (with timeouts, so a lost wake or a dead peer cannot hang anyone):
+
+- **Submit ring (game → host)**, one ordered channel for everything: `SUBMIT_GFX`,
+  `SUBMIT_GFX_FLIP`, `SUBMIT_DONE`, `DING_DONG`, `UNMAP_COMPUTE_QUEUE`, VideoOut setters and flips,
+  and requests that need an answer (`MAP_COMPUTE_QUEUE`, `VO_OPEN`, `VO_REGISTER_BUFFERS`): the
+  caller waits on its reply slot, so a request is answered after everything pushed before it.
+- **Event ring (host → game)**: `IRQ{id}` (every interrupt the host raises), `FLIP`,
+  `EOP_FLIP_QUEUED`, `VBLANK`. A dispatcher thread in `bb-probe` re-raises each IRQ on the game
+  side's interrupt controller, so the game's own registrations (`sceGnmAddEqEvent`,
+  `ResetSubmissionLock`) run unchanged.
+
+**Game side ("remote" mode of the same GPU library):** GnmDriver/VideoOut register as before but
+create no Liverpool, presenter or window. Builders run locally. Submit functions validate, honour
+the local `submission_lock` (set by every `SubmitDone`, cleared by the forwarded GpuIdle IRQ —
+the host raises GpuIdle after each SubmitDone), then push a record. VideoOut keeps its port
+bookkeeping (slots, flip status, event lists) and mirrors every change to the host; flip status
+is updated from `FLIP`/`EOP_FLIP_QUEUED` events. `sceVideoOutGetBufferLabelAddress` returns the
+host's label array address (P3a): only the host dereferences it.
+
+**Host side:** `bbgpu-host` links the arm64 GPU library and provides the `runtime_*` functions it
+imports (memory queries from the mirrored view table, timebase, fault recovery, stubs for
+AvPlayer-only ones). A service thread pops the submit ring and calls the real HLE functions; IRQ,
+flip and vblank hooks push events. The window, presenter and Vulkan device live here.
+
+**Status (2026-10-12): implemented, verified without the game; the in-game test is pending.**
+`host/bbgpu_shared.h`, `host/main.c` + `host/host_runtime.c` (the host links the arm64 GPU
+library and provides its 18 `runtime_*` imports), `gpu/shim/bbport_split.{h,cpp}`, remote/host
+branches in `gnmdriver.cpp`, `video_out.cpp`, `driver.cpp`, `bbgpu.cpp`; `probe.c` calls
+`bbgpu_init_remote` when the host is up. The view mirror now uses the submit ring (ordered with
+GPU work); AvPlayer invalidations travel as `INVALIDATE` (P8); the host window's keyboard and
+the overlay's input capture reach the game through the block (a stopgap until M5). Tests:
+`tests/test_bbgpu_rings.c` (x86-64 ↔ arm64: 2 M records in order across 782 wrap-arounds, 500 k
+events back, requests 12.8 µs mean) and `tests/test_gpu_split.c` (the real HLE functions in
+remote mode against the host: renderer start 0.23–0.38 s warm, SubmitDone → GpuIdle back in
+1.5–3 ms, a flip in 13.5–15 ms, vblanks at 62 Hz).
+
+**Not in M3 (M4):** page protection relay. Until then the host never learns about CPU writes
+after a resource's first upload, so animated content may be stale; the title screen is the exit
+test.
 
 ## M0 results (2026-10-11) — `tools/m0_spike/`
 

@@ -12,12 +12,24 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_split.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+// bbport: the game's side of the process split keeps the port bookkeeping (slots, flip status,
+// event lists) and mirrors every change to the host, which presents (bbport_split.h).
+static void PushScalar(u32 type, s64 a, s64 b = 0, double f = 0) {
+    const BbGpuScalar record{{type, sizeof(BbGpuScalar)}, a, b, f};
+    BbSplit::Push(&record);
+}
+
+void BbSplitApplyEvent(const BbGpuRecord* record) {
+    driver->ApplyRemoteEvent(record);
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
@@ -135,12 +147,32 @@ s32 PS4_SYSV_ABI sceVideoOutRegisterBuffers(s32 handle, s32 startIndex, void* co
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    return driver->RegisterBuffers(port, startIndex, addresses, bufferNum, attribute);
+    const s32 result = driver->RegisterBuffers(port, startIndex, addresses, bufferNum, attribute);
+    if (BbSplit::Remote() && result >= 0) {
+        BbGpuVoRegister record{};
+        record.r = {BBGPU_REC_VO_REGISTER_BUFFERS, sizeof(BbGpuVoRegister)};
+        record.handle = handle;
+        record.start = startIndex;
+        record.count = std::min<s32>(bufferNum, BBGPU_VO_BUFFERS_MAX);
+        static_assert(sizeof(BufferAttribute) <= BBGPU_ATTRIBUTE_BYTES);
+        std::memcpy(record.attribute, attribute, sizeof(BufferAttribute));
+        for (s32 i = 0; i < record.count; ++i) {
+            record.addresses[i] = reinterpret_cast<u64>(addresses[i]);
+        }
+        const s64 host = BbSplit::Request(&record, &record.slot);
+        if (host != result) {
+            LOG_ERROR(Lib_VideoOut, "Split: buffer group {} here, {} in the GPU host", result, host);
+        }
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSetFlipRate(s32 handle, s32 rate) {
     LOG_TRACE(Lib_VideoOut, "called");
     driver->GetPort(handle)->flip_rate = rate;
+    if (BbSplit::Remote()) {
+        PushScalar(BBGPU_REC_VO_SET_FLIP_RATE, handle, rate);
+    }
     return ORBIS_OK;
 }
 
@@ -179,6 +211,11 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
     if (!driver->SubmitFlip(port, bufferIndex, flipArg)) {
         LOG_ERROR(Lib_VideoOut, "Flip queue is full");
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+    }
+    if (BbSplit::Remote()) {
+        const BbGpuVoFlip record{{BBGPU_REC_VO_SUBMIT_FLIP, sizeof(BbGpuVoFlip)},
+                                 handle, bufferIndex, flipMode, 0, flipArg};
+        BbSplit::Push(&record);
     }
 
     return ORBIS_OK;
@@ -307,6 +344,14 @@ s32 PS4_SYSV_ABI sceVideoOutOpen(Libraries::UserService::OrbisUserServiceUserId 
 
     auto* params = reinterpret_cast<const ServiceThreadParams*>(param);
     int handle = driver->Open(params);
+    if (BbSplit::Remote() && handle >= 0) {
+        BbGpuVoOpen record{{BBGPU_REC_VO_OPEN, sizeof(BbGpuVoOpen)}, 0, static_cast<u32>(userId),
+                           busType, index};
+        const s64 host = BbSplit::Request(&record, &record.slot);
+        if (host != handle) {
+            LOG_ERROR(Lib_VideoOut, "Split: port handle {} here, {} in the GPU host", handle, host);
+        }
+    }
 
     if (handle < 0) {
         LOG_ERROR(Lib_VideoOut, "All available handles are open");
@@ -318,6 +363,9 @@ s32 PS4_SYSV_ABI sceVideoOutOpen(Libraries::UserService::OrbisUserServiceUserId 
 
 s32 PS4_SYSV_ABI sceVideoOutClose(s32 handle) {
     driver->Close(handle);
+    if (BbSplit::Remote()) {
+        PushScalar(BBGPU_REC_VO_CLOSE, handle);
+    }
     return ORBIS_OK;
 }
 
@@ -327,7 +375,11 @@ s32 PS4_SYSV_ABI sceVideoOutUnregisterBuffers(s32 handle, s32 attributeIndex) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    return driver->UnregisterBuffers(port, attributeIndex);
+    const s32 result = driver->UnregisterBuffers(port, attributeIndex);
+    if (BbSplit::Remote() && result == ORBIS_OK) {
+        PushScalar(BBGPU_REC_VO_UNREGISTER_BUFFERS, handle, attributeIndex);
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_addr) {
@@ -338,7 +390,9 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     if (!port) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
-    *label_addr = reinterpret_cast<uintptr_t>(port->buffer_labels.data());
+    // bbport: in the split, only the host's GPU reads and writes the labels (design P3a).
+    *label_addr = BbSplit::Remote() ? BbSplit::Shared()->label_address
+                                    : reinterpret_cast<uintptr_t>(port->buffer_labels.data());
     return 16;
 }
 
@@ -362,7 +416,7 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
 s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(
     s32 handle, SceVideoOutDeviceCapabilityInfo* pDeviceCapabilityInfo) {
     pDeviceCapabilityInfo->capability = 0;
-    if (presenter->IsHDRSupported()) {
+    if (BbSplit::Remote() ? BbSplit::Shared()->hdr_supported != 0 : presenter->IsHDRSupported()) {
         auto& game_info = Common::ElfInfo::Instance();
         if (game_info.GetPSFAttributes().support_hdr) {
             pDeviceCapabilityInfo->capability |= ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ;
@@ -401,6 +455,10 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    if (BbSplit::Remote()) {
+        PushScalar(BBGPU_REC_VO_ADJUST_COLOR, handle, 0, settings->gamma);
+        return ORBIS_OK;
+    }
     presenter->GetPPSettingsRef().gamma = settings->gamma;
     return ORBIS_OK;
 }
@@ -446,6 +504,9 @@ s32 PS4_SYSV_ABI sceVideoOutConfigureOutputMode_(s32 handle, u32 reserved, const
         return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
     }
 
+    if (BbSplit::Remote()) {
+        PushScalar(BBGPU_REC_VO_CONFIGURE_MODE, handle, mode->colorimetry);
+    }
     return ORBIS_OK;
 }
 
@@ -456,7 +517,95 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitChangeBufferAttribute(s32 handle, s32 attribut
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    return driver->ChangeBufferAttribute(port, attributeIndex, attribute);
+    const s32 result = driver->ChangeBufferAttribute(port, attributeIndex, attribute);
+    if (BbSplit::Remote() && result == ORBIS_OK) {
+        BbGpuVoAttribute record{};
+        record.r = {BBGPU_REC_VO_CHANGE_ATTRIBUTE, sizeof(BbGpuVoAttribute)};
+        record.handle = handle;
+        record.index = attributeIndex;
+        std::memcpy(record.attribute, attribute, sizeof(BufferAttribute));
+        BbSplit::Push(&record);
+    }
+    return result;
+}
+
+// bbport: the host's side of the process split: runs a VideoOut record from the game in order.
+// Returns false for records of other libraries.
+bool BbSplitHost(const BbGpuRecord* r) {
+    BbGpuShared* shared = BbSplit::Shared();
+    switch (r->type) {
+    case BBGPU_REC_VO_OPEN: {
+        const auto* o = reinterpret_cast<const BbGpuVoOpen*>(r);
+        bbgpu_reply_send(shared, o->slot, sceVideoOutOpen(o->user_id, o->bus_type, o->index, nullptr));
+        return true;
+    }
+    case BBGPU_REC_VO_CLOSE:
+        sceVideoOutClose(static_cast<s32>(reinterpret_cast<const BbGpuScalar*>(r)->a));
+        return true;
+    case BBGPU_REC_VO_REGISTER_BUFFERS: {
+        const auto* g = reinterpret_cast<const BbGpuVoRegister*>(r);
+        BufferAttribute attribute;
+        std::memcpy(&attribute, g->attribute, sizeof attribute);
+        void* addresses[BBGPU_VO_BUFFERS_MAX];
+        for (s32 i = 0; i < g->count && i < BBGPU_VO_BUFFERS_MAX; ++i) {
+            addresses[i] = reinterpret_cast<void*>(g->addresses[i]);
+        }
+        bbgpu_reply_send(shared, g->slot,
+                         sceVideoOutRegisterBuffers(g->handle, g->start, addresses, g->count,
+                                                    &attribute));
+        return true;
+    }
+    case BBGPU_REC_VO_UNREGISTER_BUFFERS: {
+        const auto* v = reinterpret_cast<const BbGpuScalar*>(r);
+        sceVideoOutUnregisterBuffers(static_cast<s32>(v->a), static_cast<s32>(v->b));
+        return true;
+    }
+    case BBGPU_REC_VO_CHANGE_ATTRIBUTE: {
+        const auto* c = reinterpret_cast<const BbGpuVoAttribute*>(r);
+        BufferAttribute attribute;
+        std::memcpy(&attribute, c->attribute, sizeof attribute);
+        sceVideoOutSubmitChangeBufferAttribute(c->handle, c->index, &attribute);
+        return true;
+    }
+    case BBGPU_REC_VO_SET_FLIP_RATE: {
+        const auto* v = reinterpret_cast<const BbGpuScalar*>(r);
+        sceVideoOutSetFlipRate(static_cast<s32>(v->a), static_cast<s32>(v->b));
+        return true;
+    }
+    case BBGPU_REC_VO_SUBMIT_FLIP: {
+        const auto* f = reinterpret_cast<const BbGpuVoFlip*>(r);
+        if (const s32 result = sceVideoOutSubmitFlip(f->handle, f->index, f->mode, f->flip_arg);
+            result != ORBIS_OK) {
+            LOG_ERROR(Lib_VideoOut, "Split: flip of buffer {} failed on the host: {:#x}", f->index,
+                      static_cast<u32>(result));
+        }
+        return true;
+    }
+    case BBGPU_REC_VO_ADJUST_COLOR: {
+        const auto* v = reinterpret_cast<const BbGpuScalar*>(r);
+        SceVideoOutColorSettings settings{};
+        settings.gamma = static_cast<float>(v->f);
+        sceVideoOutAdjustColor(static_cast<s32>(v->a), &settings);
+        return true;
+    }
+    case BBGPU_REC_VO_CONFIGURE_MODE: {
+        const auto* v = reinterpret_cast<const BbGpuScalar*>(r);
+        Mode mode{};
+        mode.size = sizeof mode;
+        mode.colorimetry = static_cast<u8>(v->b);
+        sceVideoOutConfigureOutputMode_(static_cast<s32>(v->a), 0, &mode, nullptr, sizeof mode, 0);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+/// bbport: the address of the host's flip labels, published to the game (design P3a).
+u64 BbSplitLabelAddress() {
+    uintptr_t address = 0;
+    sceVideoOutGetBufferLabelAddress(1, &address);
+    return address;
 }
 
 s32 PS4_SYSV_ABI sceVideoOutSetWindowModeMargins(s32 handle, s32 top, s32 bottom) {

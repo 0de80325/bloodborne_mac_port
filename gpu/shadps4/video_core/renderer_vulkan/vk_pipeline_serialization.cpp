@@ -13,8 +13,8 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
-static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderMetaVersion = 8u; // bbport: portable SRT walker bytecode
+static constexpr u32 PipelineKeyVersion = 6u; // bbport: Info layout (portable SRT walker)
 } // namespace Serialization
 
 namespace Vulkan {
@@ -440,7 +440,13 @@ void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
 
     srt.Write(this, sizeof(*this));
     if (walker_func_size) {
-        srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
+        // bbport: the walker is bytecode; loads zeroed after faults this session are stored
+        // live again (bit 31 of each opcode word).
+        std::vector<u32> code(walker_func, walker_func + walker_func_size / sizeof(u32));
+        for (size_t i = 1; i < code.size(); i += 3) {
+            code[i] &= ~(1u << 31);
+        }
+        srt.Write(code.data(), walker_func_size);
     }
 }
 

@@ -1,8 +1,10 @@
-/* Native arm64 GPU process, runtime side (docs/DESIGN_NATIVE_GPU_PROCESS.md, milestone M2).
+/* Native arm64 GPU process, runtime side (docs/DESIGN_NATIVE_GPU_PROCESS.md, M2 and M3).
  * BB_GPU_PROCESS=1 on macOS: spawns out/bbgpu-host (arm64 slice), hands it the guest memory
- * entry over Mach ports (host/bbgpu_protocol.h) and mirrors every guest view into it at the
- * same address. Rendering stays in this process (M3 moves it). The host is optional in M2:
- * if it fails to start or dies, this logs it and the runtime continues single-process.
+ * entry and a shared control block (host/bbgpu_protocol.h, host/bbgpu_shared.h) and mirrors
+ * every guest view into it at the same address, through the control block's submit ring. Then
+ * probe.c starts the renderer there (bbgpu_init_remote) and the GPU work follows on the same
+ * ring. If the host fails before the renderer starts, this logs it and the runtime continues
+ * single-process; after that, losing the host ends the game.
  *
  *   BB_GPU_PROCESS=1             enable
  *   BB_GPU_HOST=path             host executable (default: bbgpu-host next to bb-probe)
@@ -11,6 +13,9 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 #include "gpu_process.h"
 #ifdef __APPLE__
+#include "gpu/bbgpu.h"
+#include "host/bbgpu_shared.h"
+#include <mach/mach_vm.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <libgen.h>
@@ -33,15 +38,17 @@ extern char **environ;
 
 #define HANDSHAKE_TIMEOUT_MS 10000
 #define SEND_TIMEOUT_MS 2000
-#define FLUSH_MS 20
+#define FLUSH_MS 20 /* monitor tick */
 #define SAMPLE_BYTES (UINT64_C(256) * 1024)
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static int alive;                  /* mirroring active (under mutex) */
 static pid_t host_pid;
 static mach_port_t host_port = MACH_PORT_NULL, ctl_port = MACH_PORT_NULL;
-static BbGpuEvents batch;          /* pending events (under mutex) */
-static uint64_t events_sent, batches_sent, verify_seq;
+static BbGpuShared *shared;        /* the control block (bbgpu_shared.h) */
+static mach_port_t shared_entry = MACH_PORT_NULL;
+static int rendering;              /* the renderer runs in the host: losing it is fatal */
+static uint64_t events_sent, verify_seq;
 static struct { uint64_t seq; RuntimeMirrorSnapshot snapshot; } pending[4];
 
 typedef union {
@@ -57,63 +64,47 @@ typedef struct { Inbox m; mach_msg_max_trailer_t trailer; } InboxBuffer;
 static void lost_locked(const char *why) {
     if (!alive) return;
     alive = 0;
-    batch.count = 0;
+    if (rendering) {
+        printf("GPU process: host lost (%s) while rendering; exiting\n", why);
+        fflush(stdout);
+        _exit(1);
+    }
     printf("GPU process: host lost (%s); continuing single-process\n", why);
 }
 
-static void send_batch_locked(void) {
-    if (!alive || !batch.count) return;
-    batch.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-    batch.h.msgh_size = (mach_msg_size_t)(offsetof(BbGpuEvents, events) + batch.count * sizeof(BbGpuEvent));
-    batch.h.msgh_remote_port = host_port;
-    batch.h.msgh_local_port = MACH_PORT_NULL;
-    batch.h.msgh_id = BBGPU_MSG_EVENTS;
-    kern_return_t kr = mach_msg(&batch.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, batch.h.msgh_size, 0, MACH_PORT_NULL,
-                                SEND_TIMEOUT_MS, MACH_PORT_NULL);
-    if (kr != KERN_SUCCESS) {
-        char why[128];
-        snprintf(why, sizeof why, "sending view events: %s", mach_error_string(kr));
-        lost_locked(why);
-        return;
-    }
-    events_sent += batch.count;
-    ++batches_sent;
-    batch.count = 0;
-}
-
-/* runtime_memory.c, region table write lock held: append in operation order. */
+/* runtime_memory.c, region table write lock held: pushed in operation order, ahead of any GPU
+ * work issued after it (one ring, one producer lock in the GPU library). */
 static void mirror_event(int op, uintptr_t address, uint64_t size, uint64_t phys, int prot) {
     pthread_mutex_lock(&mutex);
-    if (alive) {
-        batch.events[batch.count++] = (BbGpuEvent){(uint32_t)op, (uint32_t)prot, address, size, phys};
-        if (batch.count == BBGPU_EVENTS_MAX) send_batch_locked();
-    }
+    const int live = alive;
+    if (live) ++events_sent;
     pthread_mutex_unlock(&mutex);
+    if (!live) return;
+    const BbGpuViewRecord record = {{BBGPU_REC_VIEW, sizeof record}, (uint32_t)op, (uint32_t)prot, address, size, phys};
+    bbgpu_split_push(&record);
 }
 
 /* runtime_memory.c, region table read lock held: nothing changes until this returns, so the
  * request lands in the event stream exactly after the events that built the snapshot. */
 static void emit_verify(const RuntimeMirrorSnapshot *s) {
+    BbGpuVerifyRecord v;
+    memset(&v, 0, sizeof v);
     pthread_mutex_lock(&mutex);
-    send_batch_locked();
-    if (alive) {
-        BbGpuVerify v;
-        memset(&v, 0, sizeof v);
+    const int live = alive;
+    if (live) {
+        v.r = (BbGpuRecord){BBGPU_REC_VERIFY, sizeof v};
         v.seq = ++verify_seq;
         v.views = s->views; v.bytes = s->bytes; v.events = events_sent; v.count = s->count;
-        for (unsigned i = 0; i < s->count; ++i)
-            v.samples[i] = (BbGpuSample){s->samples[i].address, s->samples[i].size, s->samples[i].checksum};
+        for (unsigned i = 0; i < s->count && i < 8; ++i) {
+            v.samples[i].address = s->samples[i].address;
+            v.samples[i].size = s->samples[i].size;
+            v.samples[i].checksum = s->samples[i].checksum;
+        }
         pending[v.seq % 4].seq = v.seq;
         pending[v.seq % 4].snapshot = *s;
-        v.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-        v.h.msgh_size = sizeof v;
-        v.h.msgh_remote_port = host_port;
-        v.h.msgh_id = BBGPU_MSG_VERIFY;
-        kern_return_t kr = mach_msg(&v.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof v, 0, MACH_PORT_NULL,
-                                    SEND_TIMEOUT_MS, MACH_PORT_NULL);
-        if (kr != KERN_SUCCESS) lost_locked(mach_error_string(kr));
     }
     pthread_mutex_unlock(&mutex);
+    if (live) bbgpu_split_push(&v);
 }
 
 static void handle_reply(const BbGpuVerifyReply *r) {
@@ -212,7 +203,6 @@ static void *monitor(void *unused) {
         nanosleep(&t, NULL);
         pthread_mutex_lock(&mutex);
         const int live = alive;
-        send_batch_locked();
         pthread_mutex_unlock(&mutex);
         if (!live) return NULL;
         if (verify_ms > 0 && elapsed_ms(&last) >= verify_ms) {
@@ -308,6 +298,19 @@ static void stop_host(void) {
     }
 }
 
+void *gpu_process_shared(void) {
+    pthread_mutex_lock(&mutex);
+    void *result = alive ? shared : NULL;
+    pthread_mutex_unlock(&mutex);
+    return result;
+}
+
+void gpu_process_rendering(void) {
+    pthread_mutex_lock(&mutex);
+    rendering = alive;
+    pthread_mutex_unlock(&mutex);
+}
+
 void gpu_process_start(void) {
     const char *env = getenv("BB_GPU_PROCESS");
     if (!env || strcmp(env, "1")) return;
@@ -323,6 +326,18 @@ void gpu_process_start(void) {
         puts("GPU process: cannot allocate the handshake port; single-process");
         return;
     }
+    /* The control block: a small entry of its own (offsets only; mapped anywhere on each side). */
+    memory_object_size_t shared_size = BBGPU_SHARED_SIZE;
+    mach_vm_address_t shared_at = 0;
+    if (mach_make_memory_entry_64(mach_task_self(), &shared_size, 0, MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE,
+                                  &shared_entry, MACH_PORT_NULL) != KERN_SUCCESS ||
+        mach_vm_map(mach_task_self(), &shared_at, BBGPU_SHARED_SIZE, 0, VM_FLAGS_ANYWHERE, shared_entry, 0, FALSE,
+                    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE) != KERN_SUCCESS) {
+        puts("GPU process: cannot create the shared control block; single-process");
+        return;
+    }
+    shared = (BbGpuShared *)(uintptr_t)shared_at;
+    bbgpu_shared_init(shared);
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     InboxBuffer in;
@@ -347,11 +362,13 @@ void gpu_process_start(void) {
         s.h.msgh_size = sizeof s;
         s.h.msgh_remote_port = host_port;
         s.h.msgh_id = BBGPU_MSG_SETUP;
-        s.body.msgh_descriptor_count = 2;
+        s.body.msgh_descriptor_count = 3;
         s.entry = (mach_msg_port_descriptor_t){.name = runtime_memory_pool_entry(),
                                                .disposition = MACH_MSG_TYPE_COPY_SEND, .type = MACH_MSG_PORT_DESCRIPTOR};
         s.control = (mach_msg_port_descriptor_t){.name = ctl_port, .disposition = MACH_MSG_TYPE_MAKE_SEND,
                                                  .type = MACH_MSG_PORT_DESCRIPTOR};
+        s.shared = (mach_msg_port_descriptor_t){.name = shared_entry, .disposition = MACH_MSG_TYPE_COPY_SEND,
+                                                .type = MACH_MSG_PORT_DESCRIPTOR};
         s.version = BBGPU_PROTOCOL_VERSION;
         s.pid = (uint32_t)getpid();
         s.entry_size = runtime_memory_pool_entry_size();
@@ -381,10 +398,11 @@ void gpu_process_start(void) {
         puts("GPU process: continuing single-process");
         return;
     }
-    printf("GPU process: host pid %d ready in %ld ms (%s, page %u bytes, window %s); guest entry 0x%" PRIx64
+    printf("GPU process: host pid %d ready in %ld ms (%s, page %u bytes); guest entry 0x%" PRIx64
            " bytes mirrored at 0x%" PRIx64 "-0x%" PRIx64 "\n",
            (int)host_pid, elapsed_ms(&start), in.m.ready.native ? "native arm64" : "TRANSLATED", in.m.ready.page_size,
-           in.m.ready.window > 0 ? "open" : in.m.ready.window < 0 ? "failed" : "not built (no arm64 SDL3)", runtime_memory_pool_entry_size(), BBGPU_GUEST_MIN, BBGPU_GUEST_MAX);
+           runtime_memory_pool_entry_size(), BBGPU_GUEST_MIN, BBGPU_GUEST_MAX);
+    bbgpu_split_attach(shared, host_pid);
     pthread_mutex_lock(&mutex);
     alive = 1;
     pthread_mutex_unlock(&mutex);

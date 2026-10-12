@@ -24,6 +24,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "bbport_split.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -62,6 +63,9 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
     main_port.resolution.full_height = height;
     main_port.resolution.pane_width = width;
     main_port.resolution.pane_height = height;
+    if (BbSplit::Remote()) {
+        return; // bbport: presentation and vblanks happen in the GPU host (ApplyRemoteEvent)
+    }
     const char* separate = std::getenv("BB_PRESENT_THREAD");
     separate_swap = !(separate && separate[0] == '0');
     if (separate_swap) {
@@ -110,7 +114,9 @@ int VideoOutDriver::Open(const ServiceThreadParams* params) {
         return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY;
     }
     main_port.is_open = true;
-    liverpool->SetVoPort(&main_port);
+    if (liverpool) {
+        liverpool->SetVoPort(&main_port);
+    }
     return 1;
 }
 
@@ -219,13 +225,14 @@ int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* co
             .address_left = address,
             .address_right = 0,
         };
-        Vulkan::FrameCapture::AddDisplayBuffer(address);
-
         // Reset flip label also when registering buffer
         port->buffer_labels[startIndex + i] = 0;
         port->SignalVoLabel();
 
-        presenter->RegisterVideoOutSurface(group, address);
+        if (!BbSplit::Remote()) {
+            Vulkan::FrameCapture::AddDisplayBuffer(address);
+            presenter->RegisterVideoOutSurface(group, address);
+        }
         LOG_INFO(Lib_VideoOut, "buffers[{}] = {:#x}", i + startIndex, address);
     }
 
@@ -542,6 +549,18 @@ void VideoOutDriver::Flip(const Request& req) {
             --flip_status.gc_queue_num;
         }
         --flip_status.flip_pending_num;
+        if (BbSplit::Host()) {
+            const BbGpuFlipEvent event{{BBGPU_EV_FLIP, sizeof(BbGpuFlipEvent)},
+                                       1,
+                                       req.index,
+                                       req.eop,
+                                       0,
+                                       req.flip_arg,
+                                       flip_status.process_time,
+                                       flip_status.tsc};
+            BbSplit::Post(&event);
+            __atomic_fetch_add(&BbSplit::Shared()->host_flips, 1, __ATOMIC_RELAXED);
+        }
     }
 
     // Trigger flip events for the port.
@@ -595,6 +614,20 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
         }
         ++port->flip_status.flip_pending_num; // integral GPU and CPU pending flips counter
         port->flip_status.submit_tsc = Libraries::Kernel::sceKernelReadTsc();
+        if (BbSplit::Host() && is_eop) {
+            const BbGpuFlipEvent event{{BBGPU_EV_EOP_FLIP_QUEUED, sizeof(BbGpuFlipEvent)},
+                                       1,
+                                       index,
+                                       1,
+                                       0,
+                                       flip_arg,
+                                       0,
+                                       port->flip_status.submit_tsc};
+            BbSplit::Post(&event);
+        }
+    }
+    if (BbSplit::Remote()) {
+        return true; // sceVideoOutSubmitFlip sends the flip to the host
     }
 
     if (!is_eop) {
@@ -719,6 +752,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             vblank_status.tsc = Libraries::Kernel::sceKernelReadTsc();
             main_port.vblank_cv.notify_all();
         }
+        if (BbSplit::Host()) {
+            const BbGpuVblank event{{BBGPU_EV_VBLANK, sizeof(BbGpuVblank)}, 1, 0,
+                                    vblank_status.count - 1, vblank_status.process_time,
+                                    vblank_status.tsc};
+            BbSplit::Post(&event);
+        }
 
         if (!immediate_flips || main_port.flip_rate != 0) {
             timer.End();
@@ -747,6 +786,72 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
         }
         std::this_thread::sleep_until(tick_deadline);
+    }
+}
+
+void VideoOutDriver::ApplyRemoteEvent(const void* record) {
+    const auto* r = static_cast<const BbGpuRecord*>(record);
+    auto* port = &main_port;
+    switch (r->type) {
+    case BBGPU_EV_FLIP: {
+        const auto* e = static_cast<const BbGpuFlipEvent*>(record);
+        BbStats::flips.fetch_add(1, std::memory_order_relaxed);
+        RecordFlipFrameTime();
+        {
+            std::unique_lock lock{port->port_mutex};
+            auto& flip_status = port->flip_status;
+            flip_status.count++;
+            flip_status.process_time = e->process_time;
+            flip_status.tsc = e->tsc;
+            flip_status.flip_arg = e->flip_arg;
+            flip_status.current_buffer = e->index;
+            if (e->eop) {
+                --flip_status.gc_queue_num;
+            }
+            --flip_status.flip_pending_num;
+        }
+        for (auto event : port->flip_events) {
+            auto equeue = Kernel::GetEqueue(event);
+            if (equeue != nullptr) {
+                equeue->TriggerEvent(
+                    static_cast<u64>(OrbisVideoOutInternalEventId::Flip),
+                    Kernel::OrbisKernelEvent::Filter::VideoOut,
+                    reinterpret_cast<void*>(static_cast<u64>(OrbisVideoOutInternalEventId::Flip) |
+                                            (e->flip_arg << 16)));
+            }
+        }
+        port->prev_index = e->index;
+        break;
+    }
+    case BBGPU_EV_EOP_FLIP_QUEUED: {
+        const auto* e = static_cast<const BbGpuFlipEvent*>(record);
+        std::unique_lock lock{port->port_mutex};
+        ++port->flip_status.gc_queue_num;
+        ++port->flip_status.flip_pending_num;
+        port->flip_status.submit_tsc = e->tsc;
+        break;
+    }
+    case BBGPU_EV_VBLANK: {
+        const auto* e = static_cast<const BbGpuVblank*>(record);
+        std::scoped_lock lock{port->vo_mutex};
+        for (auto event : port->vblank_events) {
+            auto equeue = Kernel::GetEqueue(event);
+            if (equeue != nullptr) {
+                equeue->TriggerEvent(static_cast<u64>(OrbisVideoOutInternalEventId::Vblank),
+                                     Kernel::OrbisKernelEvent::Filter::VideoOut,
+                                     reinterpret_cast<void*>(
+                                         static_cast<u64>(OrbisVideoOutInternalEventId::Vblank) |
+                                         (e->count << 16)));
+            }
+        }
+        port->vblank_status.count = e->count + 1;
+        port->vblank_status.process_time = e->process_time;
+        port->vblank_status.tsc = e->tsc;
+        port->vblank_cv.notify_all();
+        break;
+    }
+    default:
+        break;
     }
 }
 

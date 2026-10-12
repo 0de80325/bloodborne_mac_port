@@ -23,6 +23,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "bbport_split.h"
 
 extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
@@ -88,6 +89,40 @@ static void WaitGpuIdle() {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
+}
+
+// bbport: the game's side of the GPU process split (bbport_split.h). Validation and the
+// submission lock stay here; the work goes to the host in submit records, in order.
+static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_sizes_in_bytes,
+                        const u32* ccb_gpu_addrs[], const u32* ccb_sizes_in_bytes,
+                        const BbGpuSubmit* flip) {
+    u32 done = 0;
+    do {
+        const u32 n = std::min<u32>(count - done, BBGPU_SUBMIT_MAX);
+        const bool last = done + n == count;
+        BbGpuSubmit record{};
+        record.r.type = flip && last ? BBGPU_REC_SUBMIT_GFX_FLIP : BBGPU_REC_SUBMIT_GFX;
+        record.count = n;
+        record.has_ccb_addrs = ccb_gpu_addrs != nullptr;
+        record.has_ccb_sizes = ccb_sizes_in_bytes != nullptr;
+        if (flip && last) {
+            record.vo_handle = flip->vo_handle;
+            record.buf_idx = flip->buf_idx;
+            record.flip_mode = flip->flip_mode;
+            record.flip_arg = flip->flip_arg;
+        }
+        for (u32 i = 0; i < n; ++i) {
+            record.dcb[i] = reinterpret_cast<u64>(dcb_gpu_addrs[done + i]);
+            record.dcb_bytes[i] = dcb_sizes_in_bytes[done + i];
+            record.ccb[i] = ccb_gpu_addrs ? reinterpret_cast<u64>(ccb_gpu_addrs[done + i]) : 0;
+            record.ccb_bytes[i] = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[done + i] : 0;
+        }
+        bbgpu_submit_pack(&record);
+        record.r.bytes = bbgpu_submit_bytes(n);
+        BbSplit::Push(&record);
+        done += n;
+    } while (done < count);
+    return ORBIS_OK;
 }
 
 // Write a special ending NOP packet with N DWs data block
@@ -300,6 +335,13 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
 
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
+
+    if (BbSplit::Remote()) {
+        const BbGpuDingDong record{{BBGPU_REC_DING_DONG, sizeof(BbGpuDingDong)}, gnm_vqid,
+                                   next_offs_dw};
+        BbSplit::Push(&record);
+        return;
+    }
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -1220,6 +1262,17 @@ int PS4_SYSV_ABI sceGnmMapComputeQueue(u32 pipe_id, u32 queue_id, VAddr ring_bas
 
     if (VAddr(read_ptr_addr) % 4 != 0) { // alignment check
         return ORBIS_GNM_ERROR_COMPUTEQUEUE_INVALID_READ_PTR_ADDR;
+    }
+
+    if (BbSplit::Remote()) {
+        BbGpuMapComputeQueue record{{BBGPU_REC_MAP_COMPUTE_QUEUE, sizeof(BbGpuMapComputeQueue)},
+                                    0,
+                                    pipe_id,
+                                    queue_id,
+                                    ring_size_dw,
+                                    VAddr(ring_base_addr),
+                                    reinterpret_cast<u64>(read_ptr_addr)};
+        return static_cast<int>(BbSplit::Request(&record, &record.slot));
     }
 
     const auto vqid =
@@ -2298,6 +2351,16 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
 
+    if (BbSplit::Remote()) {
+        BbGpuSubmit flip{};
+        flip.vo_handle = vo_handle;
+        flip.buf_idx = buf_idx;
+        flip.flip_mode = flip_mode;
+        flip.flip_arg = flip_arg;
+        return RemoteSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
+                            const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes, &flip);
+    }
+
     const s32 patch_result =
         PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg, nullptr /*unk*/);
     if (patch_result != ORBIS_OK) {
@@ -2341,6 +2404,11 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
 
+    if (BbSplit::Remote()) {
+        return RemoteSubmit(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs,
+                            ccb_sizes_in_bytes, nullptr);
+    }
+
     return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
                          const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
 }
@@ -2357,6 +2425,18 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
+    if (BbSplit::Remote()) {
+        // Whether the host's GPU is idle is not known here: lock until its GpuIdle interrupt,
+        // which the host raises once it has processed this SubmitDone (forwarded as an event).
+        {
+            std::scoped_lock lock{m_wait_idle};
+            submission_lock = 1;
+        }
+        const BbGpuRecord record{BBGPU_REC_SUBMIT_DONE, sizeof(BbGpuRecord)};
+        BbSplit::Push(&record);
+        ++frames_submitted;
+        return ORBIS_OK;
+    }
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
@@ -2368,6 +2448,11 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
 }
 
 int PS4_SYSV_ABI sceGnmUnmapComputeQueue(u32 vqid) {
+    if (BbSplit::Remote()) {
+        const BbGpuScalar record{{BBGPU_REC_UNMAP_COMPUTE_QUEUE, sizeof(BbGpuScalar)}, vqid, 0, 0};
+        BbSplit::Push(&record);
+        return ORBIS_OK;
+    }
     liverpool->asc_queues.erase(Common::SlotId{vqid - 1});
     return ORBIS_OK;
 }
@@ -2918,16 +3003,19 @@ int PS4_SYSV_ABI Func_F916890425496553() {
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
-    LOG_INFO(Lib_GnmDriver, "Initializing presenter");
-    liverpool = std::make_unique<AmdGpu::Liverpool>();
-    presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    // bbport: the game's side of the process split has no GPU: the host runs Liverpool.
+    if (!BbSplit::Remote()) {
+        LOG_INFO(Lib_GnmDriver, "Initializing presenter");
+        liverpool = std::make_unique<AmdGpu::Liverpool>();
+        presenter = std::make_unique<Vulkan::Presenter>(*g_window, liverpool.get());
+    }
 
     const s32 result = sceKernelGetCompiledSdkVersion(&sdk_version);
     if (result != ORBIS_OK) {
         sdk_version = 0;
     }
 
-    if (EmulatorSettings.IsCopyGpuBuffers()) {
+    if (liverpool && EmulatorSettings.IsCopyGpuBuffers()) {
         liverpool->ReserveCopyBufferSpace();
     }
 
@@ -3293,5 +3381,60 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("ut57TBmRQN0", "libSceGnmWaitFreeSubmit", 1, "libSceGnmDriver",
                  Func_BADE7B4C199140DD);
 };
+
+// bbport: the host's side of the process split: runs a GnmDriver record from the game, in the
+// order the game issued them (bbport_split.h). Returns false for records of other libraries.
+bool BbSplitHost(const BbGpuRecord* r) {
+    switch (r->type) {
+    case BBGPU_REC_SUBMIT_GFX:
+    case BBGPU_REC_SUBMIT_GFX_FLIP: {
+        BbGpuSubmit s;
+        bbgpu_submit_unpack(r, &s);
+        u32* dcb[BBGPU_SUBMIT_MAX];
+        u32* ccb[BBGPU_SUBMIT_MAX];
+        for (u32 i = 0; i < s.count; ++i) {
+            dcb[i] = reinterpret_cast<u32*>(s.dcb[i]);
+            ccb[i] = reinterpret_cast<u32*>(s.ccb[i]);
+        }
+        u32** ccb_addrs = s.has_ccb_addrs ? ccb : nullptr;
+        u32* ccb_sizes = s.has_ccb_sizes ? s.ccb_bytes : nullptr;
+        const s32 result =
+            r->type == BBGPU_REC_SUBMIT_GFX_FLIP
+                ? sceGnmSubmitAndFlipCommandBuffersForWorkload(s.count, s.count, dcb, s.dcb_bytes,
+                                                               ccb_addrs, ccb_sizes, s.vo_handle,
+                                                               s.buf_idx, s.flip_mode, s.flip_arg)
+                : sceGnmSubmitCommandBuffersForWorkload(
+                      s.count, s.count, const_cast<const u32**>(dcb), s.dcb_bytes,
+                      const_cast<const u32**>(ccb_addrs), ccb_sizes);
+        if (result != ORBIS_OK) {
+            LOG_ERROR(Lib_GnmDriver, "Split: submit of {} buffers failed on the host: {:#x}",
+                      s.count, static_cast<u32>(result));
+        }
+        __atomic_fetch_add(&BbSplit::Shared()->host_submits, 1, __ATOMIC_RELAXED);
+        return true;
+    }
+    case BBGPU_REC_SUBMIT_DONE:
+        sceGnmSubmitDone();
+        return true;
+    case BBGPU_REC_DING_DONG: {
+        const auto* d = reinterpret_cast<const BbGpuDingDong*>(r);
+        sceGnmDingDong(d->vqid, d->next_offs_dw);
+        return true;
+    }
+    case BBGPU_REC_MAP_COMPUTE_QUEUE: {
+        const auto* m = reinterpret_cast<const BbGpuMapComputeQueue*>(r);
+        const int result = sceGnmMapComputeQueue(m->pipe_id, m->queue_id, VAddr(m->ring_base),
+                                                 m->ring_size_dw,
+                                                 reinterpret_cast<u32*>(m->read_ptr_addr));
+        bbgpu_reply_send(BbSplit::Shared(), m->slot, result);
+        return true;
+    }
+    case BBGPU_REC_UNMAP_COMPUTE_QUEUE:
+        sceGnmUnmapComputeQueue(static_cast<u32>(reinterpret_cast<const BbGpuScalar*>(r)->a));
+        return true;
+    default:
+        return false;
+    }
+}
 
 } // namespace Libraries::GnmDriver
