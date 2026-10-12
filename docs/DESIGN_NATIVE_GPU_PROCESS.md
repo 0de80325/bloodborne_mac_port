@@ -1,6 +1,6 @@
 # Design: Native ARM64 GPU process (option A)
 
-Status: **M0 spike passed — GO; M1 and M2 done; M3 implemented, in-game test pending** (2026-10-12). Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
+Status: **M0 spike passed — GO; M1, M2 and M3 done** (2026-10-12): the title screen renders through the native host at 60 FPS. M4 next. Originally a proposal for decision. Reverses founding decision 1 in `CLAUDE.md`
 ("everything runs as one x86-64 process under Rosetta"), so it needs the owner's go-ahead.
 Evidence behind it: [`FINDINGS.md`](FINDINGS.md), Part 2.
 
@@ -195,7 +195,12 @@ imports (memory queries from the mirrored view table, timebase, fault recovery, 
 AvPlayer-only ones). A service thread pops the submit ring and calls the real HLE functions; IRQ,
 flip and vblank hooks push events. The window, presenter and Vulkan device live here.
 
-**Status (2026-10-12): implemented, verified without the game; the in-game test is pending.**
+**Status (2026-10-12): done — the game's title screen renders through the host (60 FPS, 21 mirror checks match).**
+The first in-game run found a real race (fixed for both modes): GpuIdle is raised whenever the GPU
+queues run dry, so an idle from a drain *before* the latest `sceGnmSubmitDone` could release the
+guest's submission lock; the guest then reused command buffers not yet parsed ("Unimplemented PM4
+type 0"). SubmitDone calls are now numbered; the GPU thread publishes the last one it handled and
+only a GpuIdle following the latest releases the lock (forwarded GpuIdle events carry the number).
 `host/bbgpu_shared.h`, `host/main.c` + `host/host_runtime.c` (the host links the arm64 GPU
 library and provides its 18 `runtime_*` imports), `gpu/shim/bbport_split.{h,cpp}`, remote/host
 branches in `gnmdriver.cpp`, `video_out.cpp`, `driver.cpp`, `bbgpu.cpp`; `probe.c` calls

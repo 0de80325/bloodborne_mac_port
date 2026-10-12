@@ -119,8 +119,8 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
    `docs/HLE_CLASSIFICATION.md`. M3 implemented (2026-10-12, design "M3 plan"): portable SRT walker
    (bytecode), shared control block + rings (`host/bbgpu_shared.h`), host links the arm64 GPU
    library (`host/host_runtime.c`), game side in "remote" mode (`gpu/shim/bbport_split.*`).
-   Tests pass (`tests/test_bbgpu_rings.c`, `tests/test_gpu_split.c`); **pending: the game itself
-   with `BB_GPU_PROCESS=1` (title screen through the host)**. Then M4: protection relay.
+   Tests pass (`tests/test_bbgpu_rings.c`, `tests/test_gpu_split.c`); the title screen renders
+   through the host at 60 FPS. Next: M4 (protection relay), then M5 (input in the host).
 2. Menu bugs: "Subpixel jitter" unticks itself; menu choices (upscaler/preset) not persisted
    as expected. MetalFX distant shimmer (jitter sign: `BB_METALFX_JITTER_SIGN=-1`).
 3. Rendering: half-rendered character after reloading a save; ghosting in character creation;

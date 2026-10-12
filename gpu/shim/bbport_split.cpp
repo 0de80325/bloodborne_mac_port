@@ -10,6 +10,9 @@
 #include <unistd.h>
 #include "common/thread.h"
 #include "core/platform.h"
+#include "video_core/amdgpu/liverpool.h"
+
+extern std::unique_ptr<AmdGpu::Liverpool> liverpool; // gnmdriver.cpp
 
 namespace Libraries::VideoOut {
 void BbSplitApplyEvent(const BbGpuRecord* record);
@@ -21,6 +24,7 @@ namespace {
 std::atomic<Mode> g_mode{Mode::Single};
 BbGpuShared* g_shared;
 std::mutex g_push_mutex; // producers on this side of each ring
+std::atomic<u64> g_gpu_idle_seq;
 
 constexpr u64 Second = 1'000'000'000;
 
@@ -95,6 +99,10 @@ s64 Request(void* record, u32* slot) {
     return result;
 }
 
+u64 GpuIdleSeq() {
+    return g_gpu_idle_seq.load(std::memory_order_acquire);
+}
+
 void StartEventDispatcher() {
     std::thread([] {
         Common::SetCurrentThreadName("bb:GpuEvents");
@@ -109,6 +117,11 @@ void StartEventDispatcher() {
             }
             switch (r->type) {
             case BBGPU_EV_IRQ:
+                if (reinterpret_cast<const BbGpuIrq*>(r)->id ==
+                    static_cast<u32>(Platform::InterruptId::GpuIdle)) {
+                    g_gpu_idle_seq.store(reinterpret_cast<const BbGpuIrq*>(r)->seq,
+                                         std::memory_order_release);
+                }
                 // The game's own registrations (sceGnmAddEqEvent, the submission lock) run here
                 // as they ran on the GPU thread in a single process.
                 Platform::IrqC::Instance()->Signal(
@@ -143,7 +156,11 @@ void ForwardInterrupts() {
         Platform::IrqC::Instance()->Register(
             id,
             [](InterruptId irq) {
-                const BbGpuIrq event{{BBGPU_EV_IRQ, sizeof(BbGpuIrq)}, static_cast<u32>(irq), 0};
+                // GpuIdle carries the SubmitDone it follows (gnmdriver ResetSubmissionLock).
+                const u32 seq = irq == InterruptId::GpuIdle && liverpool
+                                    ? static_cast<u32>(liverpool->SubmitDonesHandled())
+                                    : 0;
+                const BbGpuIrq event{{BBGPU_EV_IRQ, sizeof(BbGpuIrq)}, static_cast<u32>(irq), seq};
                 Post(&event);
             },
             &uid);

@@ -218,6 +218,10 @@ void Liverpool::Process(std::stop_token stoken) {
         }
 
         if (submit_done) {
+            {
+                std::scoped_lock lk{submit_mutex};
+                submit_dones_handled.store(submit_done_seq, std::memory_order_release);
+            }
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();

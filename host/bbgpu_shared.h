@@ -118,7 +118,7 @@ typedef struct {
 } BbGpuVerifyRecord;
 typedef struct { BbGpuRecord r; uint32_t slot, pad; } BbGpuStart; /* configuration: in the block */
 
-typedef struct { BbGpuRecord r; uint32_t id, pad; } BbGpuIrq;
+typedef struct { BbGpuRecord r; uint32_t id, seq; } BbGpuIrq; /* seq: GpuIdle: SubmitDones handled */
 typedef struct {
     BbGpuRecord r;
     int32_t handle, index;

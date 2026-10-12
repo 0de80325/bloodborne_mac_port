@@ -99,12 +99,23 @@ public:
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
-    void SubmitDone() noexcept {
+    /// bbport: seq numbers the guest's sceGnmSubmitDone calls; the GPU thread publishes the
+    /// latest one it handled before raising GpuIdle (SubmitDonesHandled).
+    void SubmitDone(u64 seq = 0) noexcept {
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
         submit_done = true;
+        submit_done_seq = seq;
         submit_cv.notify_one();
+    }
+
+    /// bbport: the last SubmitDone the GPU thread has handled. Every GpuIdle raised after it was
+    /// handled follows all work submitted before that SubmitDone; an idle from an earlier drain
+    /// (GpuIdle is raised whenever the queues run dry) does not, and must not release the
+    /// guest's submission lock (gnmdriver ResetSubmissionLock).
+    u64 SubmitDonesHandled() const noexcept {
+        return submit_dones_handled.load(std::memory_order_acquire);
     }
 
     void WaitGpuIdle() noexcept {
@@ -277,6 +288,8 @@ private:
     std::atomic<bool> work_retired{true};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
+    u64 submit_done_seq{};                   ///< bbport: under submit_mutex
+    std::atomic<u64> submit_dones_handled{}; ///< bbport: see SubmitDonesHandled
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};

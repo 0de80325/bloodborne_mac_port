@@ -31,6 +31,8 @@ void Push(const void* record);
 /// Sends a request record whose u32 reply-slot field is at `slot`, then waits for the host's
 /// answer (every record pushed before it has been handled by then).
 s64 Request(void* record, u32* slot);
+/// The SubmitDone count the host's latest forwarded GpuIdle follows (see ResetSubmissionLock).
+u64 GpuIdleSeq();
 /// Starts the thread that applies the host's events (IRQs, flips, vblanks).
 void StartEventDispatcher();
 

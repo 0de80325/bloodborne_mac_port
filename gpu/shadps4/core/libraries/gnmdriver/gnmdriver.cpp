@@ -79,8 +79,20 @@ static u32 asc_next_offs_dw[Liverpool::NumComputeRings];
 static VAddr tessellation_factors_ring_addr = -1;
 static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
 
+// bbport: SubmitDone calls so far; only a GpuIdle that follows the latest one releases the lock
+// (Liverpool::SubmitDonesHandled). GpuIdle is raised whenever the GPU queues run dry: one from
+// a drain before the latest SubmitDone (in flight while it set the lock, or forwarded late from
+// the GPU host) released the lock early, and the guest reused command buffers the GPU had not
+// read yet ("Unimplemented PM4 type 0").
+static std::atomic<u64> submit_dones_issued{};
+
 static void ResetSubmissionLock(Platform::InterruptId irq) {
-    std::unique_lock lock{m_wait_idle};
+    std::unique_lock lock{m_wait_idle}; // SubmitDone sets the lock and counts under it too
+    const u64 handled =
+        BbSplit::Remote() ? BbSplit::GpuIdleSeq() : liverpool->SubmitDonesHandled();
+    if (handled < submit_dones_issued.load(std::memory_order_acquire)) {
+        return;
+    }
     submission_lock = 0;
     cv_lock.notify_all();
 }
@@ -2431,16 +2443,22 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
         {
             std::scoped_lock lock{m_wait_idle};
             submission_lock = 1;
+            submit_dones_issued.fetch_add(1, std::memory_order_release);
         }
         const BbGpuRecord record{BBGPU_REC_SUBMIT_DONE, sizeof(BbGpuRecord)};
         BbSplit::Push(&record);
         ++frames_submitted;
         return ORBIS_OK;
     }
-    if (!liverpool->IsGpuIdle()) {
-        submission_lock = true;
+    u64 seq;
+    {
+        std::scoped_lock lock{m_wait_idle};
+        seq = submit_dones_issued.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (!liverpool->IsGpuIdle()) {
+            submission_lock = true;
+        }
     }
-    liverpool->SubmitDone();
+    liverpool->SubmitDone(seq);
     send_init_packet = true;
     ++frames_submitted;
     DebugState.IncGnmFrameNum();
