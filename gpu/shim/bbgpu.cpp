@@ -26,6 +26,7 @@
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
+#include "common/signal_context.h"
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
@@ -270,6 +271,20 @@ extern "C" int bbgpu_host_start(const BbGpuConfig* config, void* shared) {
     return result;
 }
 
+extern "C" int bbgpu_host_fault(uint64_t address, int write) {
+    auto* rasterizer = Core::Memory::Instance()->GetRasterizer();
+    if (!rasterizer) {
+        return 0;
+    }
+    if (write) {
+        BbStats::Timer timer{BbStats::t_write_faults};
+        return rasterizer->OnWriteFault(address, false) ? 1 : 0;
+    }
+    BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+    BbStats::Timer timer{BbStats::t_read_faults};
+    return rasterizer->ReadMemory(address, 8, false) ? 1 : 0;
+}
+
 extern "C" int bbgpu_host_dispatch(const void* record) {
     const auto* r = static_cast<const BbGpuRecord*>(record);
     if (r->type == BBGPU_REC_INVALIDATE) {
@@ -391,6 +406,12 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
 }
 
 extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+    if (BbSplit::Remote()) {
+        // M4: GPU page tracking lives in the host; it handles the fault and unprotects.
+        return BbSplit::RelayFault(reinterpret_cast<u64>(address), Common::IsWriteError(ucontext))
+                   ? 1
+                   : 0;
+    }
     return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
 }
 

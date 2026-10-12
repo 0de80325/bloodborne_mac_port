@@ -108,7 +108,7 @@ static void start_renderer(const BbGpuStart *request) {
     const BbGpuConfig config = {s->title, s->serial, s->user_dir, s->sdk_version, s->psf_attributes, s->width, s->height};
     const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     const int rc = started ? -1 : bbgpu_host_start(&config, s);
-    started = rc == 0;
+    __atomic_store_n(&started, rc == 0, __ATOMIC_RELEASE);
     say("renderer %s in %.0f ms (%s, %dx%d)", started ? "started" : "FAILED to start",
         (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6, config.serial, config.width, config.height);
     bbgpu_reply_send(s, request->slot, rc);
@@ -141,6 +141,24 @@ static void *ring_thread(void *unused) {
             }
         }
         bbgpu_ring_pop(&s->submit, r);
+    }
+    return NULL;
+}
+
+/* ---- M4: faults the game took on GPU-protected pages ----------------------------------------
+ * The renderer handles them as in one process (mark the range CPU-dirty or download GPU data,
+ * then unprotect through the protect relay) and answers; the game then retries the access. Its
+ * own thread: a fault must never wait behind GPU work on the submit ring. */
+static void *fault_thread(void *unused) {
+    (void)unused;
+    BbGpuShared *s = g_shared;
+    for (;;) {
+        const BbGpuRecord *r = bbgpu_ring_peek(s, &s->faults, UINT64_C(1000000000));
+        if (!r) continue;
+        const BbGpuFault fault = *(const BbGpuFault *)r;
+        bbgpu_ring_pop(&s->faults, r);
+        const int handled = __atomic_load_n(&started, __ATOMIC_ACQUIRE) ? bbgpu_host_fault(fault.address, (int)fault.write) : 0;
+        bbgpu_reply_send(s, fault.slot, handled);
     }
     return NULL;
 }
@@ -335,6 +353,8 @@ int main(void) {
         pthread_attr_init(&attr);
         pthread_attr_setstacksize(&attr, 16u << 20);
         pthread_create(&thread, &attr, ring_thread, NULL);
+        pthread_detach(thread);
+        pthread_create(&thread, &attr, fault_thread, NULL);
         pthread_detach(thread);
     }
     send_ready(status);

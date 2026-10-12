@@ -23,6 +23,9 @@ int bbgpu_init_remote(const BbGpuConfig *config, void *shared);
 /* GPU host (bbgpu-host): creates the window, Vulkan device, presenter and command processor
  * here, publishes host facts in the shared block and forwards GPU interrupts. 0 on success. */
 int bbgpu_host_start(const BbGpuConfig *config, void *shared);
+/* GPU host: a fault the game took on a GPU-protected page (M4): 1 when the renderer handled it
+ * (the game retries the access), 0 when the address is not GPU memory. */
+int bbgpu_host_fault(uint64_t address, int write);
 /* GPU host: runs one GnmDriver/VideoOut record from the submit ring (answers requests itself).
  * 0 when the record type is not the GPU library's. */
 int bbgpu_host_dispatch(const void *record);

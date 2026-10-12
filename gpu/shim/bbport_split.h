@@ -33,6 +33,9 @@ void Push(const void* record);
 s64 Request(void* record, u32* slot);
 /// The SubmitDone count the host's latest forwarded GpuIdle follows (see ResetSubmissionLock).
 u64 GpuIdleSeq();
+/// M4: a fault on a GPU-protected page, handled by the host (which unprotects before it
+/// answers). False for addresses outside the mirrored guest range or not GPU memory.
+bool RelayFault(u64 address, bool write);
 /// Starts the thread that applies the host's events (IRQs, flips, vblanks).
 void StartEventDispatcher();
 

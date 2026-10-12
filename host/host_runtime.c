@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -232,13 +233,28 @@ int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, i
     return found;
 }
 
-/* Page tracking: the protection relay to bb-probe is M4. Until then the host never sees CPU
- * writes after a first upload; counted so the gap is visible. */
-static uint64_t protect_requests;
+/* GPU page tracking (M4): protection only matters where the game runs, so each request goes to
+ * bb-probe (protect ring) and returns once applied there, as an mprotect would in one process:
+ * a game write after this returns faults, and the fault comes back here (main.c). */
+static pthread_mutex_t protect_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t protect_seq;
+static void game_alive_or_exit(void) {
+    if (g_shared->game_pid > 0 && kill(g_shared->game_pid, 0) != 0) {
+        say("bb-probe is gone (protect relay); exiting");
+        _exit(0);
+    }
+}
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write) {
-    (void)address; (void)size; (void)read; (void)write;
-    if (__atomic_fetch_add(&protect_requests, 1, __ATOMIC_RELAXED) == 0)
-        say("page tracking requests ignored until the protection relay (M4)");
+    pthread_mutex_lock(&protect_lock);
+    const uint32_t seq = ++protect_seq;
+    const BbGpuProtect record = {{BBGPU_REC_PROTECT, sizeof record}, address, size, (uint32_t)read, (uint32_t)write, seq, 0};
+    while (bbgpu_ring_push(g_shared, &g_shared->protect, &record, UINT64_C(1000000000))) game_alive_or_exit();
+    pthread_mutex_unlock(&protect_lock);
+    for (;;) {
+        const uint32_t done = __atomic_load_n(&g_shared->protect_done, __ATOMIC_ACQUIRE);
+        if ((int32_t)(done - seq) >= 0) return;
+        if (bbgpu_wait_word(&g_shared->protect_done, done, UINT64_C(1000000000))) game_alive_or_exit();
+    }
 }
 
 /* Timebase: the runtime's process clock (CLOCK_MONOTONIC is system-wide) and guest TSC rate. */

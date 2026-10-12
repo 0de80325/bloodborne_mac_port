@@ -14,6 +14,8 @@
 
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool; // gnmdriver.cpp
 
+extern "C" void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+
 namespace Libraries::VideoOut {
 void BbSplitApplyEvent(const BbGpuRecord* record);
 }
@@ -23,7 +25,8 @@ namespace {
 
 std::atomic<Mode> g_mode{Mode::Single};
 BbGpuShared* g_shared;
-std::mutex g_push_mutex; // producers on this side of each ring
+std::mutex g_push_mutex;  // producers on this side of each ring
+std::mutex g_fault_mutex; // game: producers of the fault ring (fault handlers)
 std::atomic<u64> g_gpu_idle_seq;
 
 constexpr u64 Second = 1'000'000'000;
@@ -71,6 +74,27 @@ void Attach(BbGpuShared* shared) {
 void InitRemote(BbGpuShared* shared) {
     g_shared = shared;
     g_mode = Mode::Remote;
+    // M4: the host's page protection requests, applied here and acknowledged in order.
+    std::thread([] {
+        Common::SetCurrentThreadName("bb:GpuProtect");
+        BbGpuShared* s = g_shared;
+        for (;;) {
+            const BbGpuRecord* r = bbgpu_ring_peek(s, &s->protect, Second);
+            if (!r) {
+                if (!PeerAlive(s->host_pid)) {
+                    PeerLost("GPU host");
+                }
+                continue;
+            }
+            const auto* p = reinterpret_cast<const BbGpuProtect*>(r);
+            runtime_memory_gpu_protect(p->address, p->size, static_cast<int>(p->read),
+                                       static_cast<int>(p->write));
+            const u32 seq = p->seq;
+            bbgpu_ring_pop(&s->protect, r);
+            __atomic_store_n(&s->protect_done, seq, __ATOMIC_RELEASE);
+            bbgpu_wake_word(&s->protect_done);
+        }
+    }).detach();
 }
 
 void InitHost(BbGpuShared* shared) {
@@ -97,6 +121,30 @@ s64 Request(void* record, u32* slot) {
         }
     }
     return result;
+}
+
+bool RelayFault(u64 address, bool write) {
+    if (address < BBGPU_GUEST_MIN || address >= BBGPU_GUEST_MAX) {
+        return false;
+    }
+    const int slot = bbgpu_reply_claim(g_shared);
+    const BbGpuFault fault{{BBGPU_REC_FAULT, sizeof(BbGpuFault)}, address, static_cast<u32>(slot),
+                           write ? 1u : 0u};
+    {
+        std::scoped_lock lock{g_fault_mutex};
+        while (bbgpu_ring_push(g_shared, &g_shared->faults, &fault, Second) != 0) {
+            if (!PeerAlive(g_shared->host_pid)) {
+                PeerLost("GPU host");
+            }
+        }
+    }
+    s64 handled = 0;
+    while (bbgpu_reply_wait(g_shared, slot, &handled, Second) != 0) {
+        if (!PeerAlive(g_shared->host_pid)) {
+            PeerLost("GPU host");
+        }
+    }
+    return handled != 0;
 }
 
 u64 GpuIdleSeq() {

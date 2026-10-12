@@ -28,12 +28,18 @@
 #define BBGPU_STATIC_ASSERT _Static_assert
 #endif
 
+/* The mirrored guest range (identical to host/bbgpu_protocol.h). */
+#define BBGPU_GUEST_MIN UINT64_C(0x7000000000)
+#define BBGPU_GUEST_MAX UINT64_C(0xfc00000000)
+
 #define BBGPU_SHARED_MAGIC 0x31424742u /* "BGB1" */
-#define BBGPU_SHARED_VERSION 1u
+#define BBGPU_SHARED_VERSION 2u /* 2: M4 protect and fault rings */
 #define BBGPU_SHARED_SIZE (UINT64_C(4) << 20)
 #define BBGPU_SUBMIT_RING_BYTES (UINT64_C(2) << 20)
 #define BBGPU_EVENT_RING_BYTES (UINT64_C(512) << 10)
-#define BBGPU_REQUEST_SLOTS 8
+#define BBGPU_REQUEST_SLOTS 32 /* requests and fault relays in flight (bit mask in a u32) */
+#define BBGPU_PROTECT_RING_BYTES (UINT64_C(256) << 10)
+#define BBGPU_FAULT_RING_BYTES (UINT64_C(64) << 10)
 
 /* ---- records: game -> host (submit ring) ---- */
 enum {
@@ -67,6 +73,12 @@ enum {
     BBGPU_EV_FLIP,             /* BbGpuFlipEvent: a flip was presented */
     BBGPU_EV_EOP_FLIP_QUEUED,  /* BbGpuFlipEvent: an end-of-pipe flip entered the queue */
     BBGPU_EV_VBLANK,           /* BbGpuVblank */
+};
+
+/* ---- M4 page tracking: protect ring (host -> game), fault ring (game -> host) ---- */
+enum {
+    BBGPU_REC_PROTECT = 1, /* BbGpuProtect: apply GPU page protection in the game (acknowledged) */
+    BBGPU_REC_FAULT = 2,   /* BbGpuFault (request): the game hit a GPU-protected page */
 };
 
 typedef struct { uint32_t type, bytes; } BbGpuRecord;
@@ -118,7 +130,9 @@ typedef struct {
 } BbGpuVerifyRecord;
 typedef struct { BbGpuRecord r; uint32_t slot, pad; } BbGpuStart; /* configuration: in the block */
 
-typedef struct { BbGpuRecord r; uint32_t id, seq; } BbGpuIrq; /* seq: GpuIdle: SubmitDones handled */
+typedef struct { BbGpuRecord r; uint32_t id, seq; } BbGpuIrq;
+typedef struct { BbGpuRecord r; uint64_t address, size; uint32_t read, write, seq, pad; } BbGpuProtect;
+typedef struct { BbGpuRecord r; uint64_t address; uint32_t slot, write; } BbGpuFault; /* seq: GpuIdle: SubmitDones handled */
 typedef struct {
     BbGpuRecord r;
     int32_t handle, index;
@@ -168,13 +182,17 @@ typedef struct {
     uint8_t keys[512];
     BBGPU_ALIGNAS(BBGPU_CACHE_LINE) BbGpuReply replies[BBGPU_REQUEST_SLOTS];
     uint32_t reply_slots_used; /* game side: bit mask of slots in use */
-    BbGpuRing submit, events;
+    /* M4: the last protect request the game applied (futex word; compare as signed u32 deltas). */
+    BBGPU_ALIGNAS(BBGPU_CACHE_LINE) uint32_t protect_done;
+    BbGpuRing submit, events, protect, faults;
 } BbGpuShared;
 
 #define BBGPU_SUBMIT_RING_OFFSET (UINT64_C(64) << 10)
 #define BBGPU_EVENT_RING_OFFSET (BBGPU_SUBMIT_RING_OFFSET + BBGPU_SUBMIT_RING_BYTES)
 BBGPU_STATIC_ASSERT(sizeof(BbGpuShared) <= BBGPU_SUBMIT_RING_OFFSET, "control block fits before the rings");
-BBGPU_STATIC_ASSERT(BBGPU_EVENT_RING_OFFSET + BBGPU_EVENT_RING_BYTES <= BBGPU_SHARED_SIZE, "rings fit");
+#define BBGPU_PROTECT_RING_OFFSET (BBGPU_EVENT_RING_OFFSET + BBGPU_EVENT_RING_BYTES)
+#define BBGPU_FAULT_RING_OFFSET (BBGPU_PROTECT_RING_OFFSET + BBGPU_PROTECT_RING_BYTES)
+BBGPU_STATIC_ASSERT(BBGPU_FAULT_RING_OFFSET + BBGPU_FAULT_RING_BYTES <= BBGPU_SHARED_SIZE, "rings fit");
 BBGPU_STATIC_ASSERT(sizeof(BbGpuSubmit) % 8 == 0 && sizeof(BbGpuFlipEvent) % 8 == 0, "record alignment");
 
 static inline uint32_t bbgpu_submit_bytes(uint32_t count) {
@@ -330,13 +348,15 @@ static inline void bbgpu_shared_init(BbGpuShared *s) {
     s->size = BBGPU_SHARED_SIZE;
     bbgpu_ring_init(s, &s->submit, BBGPU_SUBMIT_RING_OFFSET, BBGPU_SUBMIT_RING_BYTES);
     bbgpu_ring_init(s, &s->events, BBGPU_EVENT_RING_OFFSET, BBGPU_EVENT_RING_BYTES);
+    bbgpu_ring_init(s, &s->protect, BBGPU_PROTECT_RING_OFFSET, BBGPU_PROTECT_RING_BYTES);
+    bbgpu_ring_init(s, &s->faults, BBGPU_FAULT_RING_OFFSET, BBGPU_FAULT_RING_BYTES);
 }
 
 /* ---- request slots (game side): claim, push the request, wait, release ---- */
 static inline int bbgpu_reply_claim(BbGpuShared *s) {
     for (;;) {
         uint32_t used = __atomic_load_n(&s->reply_slots_used, __ATOMIC_ACQUIRE);
-        if (used == (1u << BBGPU_REQUEST_SLOTS) - 1) { bbgpu_cpu_relax(); continue; }
+        if (used == UINT32_MAX) { bbgpu_cpu_relax(); continue; }
         const int slot = __builtin_ctz(~used);
         if (__atomic_compare_exchange_n(&s->reply_slots_used, &used, used | (1u << slot), 0, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE)) {
