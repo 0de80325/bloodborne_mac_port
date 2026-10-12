@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <memory>
+#include <unordered_map>
+
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_barrier_tracker.h"
@@ -26,6 +29,17 @@ class Runtime {
 public:
     explicit Runtime(const Instance& instance, Scheduler& scheduler);
     ~Runtime() = default;
+
+    /// bbport: upload hoisting. A copy issued inside a render pass may run ahead of the whole
+    /// submission (Scheduler::RecordHoistedCopy) when nothing in this submission has used its
+    /// destination yet; then the pass stays open. Tracked per 4 KiB page of registered buffers
+    /// (the buffer cache arenas), with the submission's tick.
+    void RegisterHoistTarget(const VideoCore::Buffer* buffer, u64 size);
+    void NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64 size);
+    /// Records the copies ahead of the submission and returns true, or false (nothing done)
+    /// when that is not safe or not useful; the caller then uses CopyBuffer.
+    bool HoistCopy(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                   std::span<const vk::BufferCopy> copies);
 
     Scheduler& GetScheduler() {
         return scheduler;
@@ -110,6 +124,12 @@ public:
     }
 
 private:
+    struct HoistPages {
+        std::unique_ptr<u32[]> tick; ///< low 32 bits of the submission tick that used the page
+        u64 pages;
+    };
+    std::unordered_map<const VideoCore::Buffer*, HoistPages> hoist_targets;
+
     void (*image_access_hook)(void*) = nullptr;
     void* image_access_context = nullptr;
     const Instance& instance;

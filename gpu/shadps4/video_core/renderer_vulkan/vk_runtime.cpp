@@ -97,6 +97,53 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 }
 
+void Runtime::RegisterHoistTarget(const VideoCore::Buffer* buffer, u64 size) {
+    const u64 pages = (size + 4095) >> 12;
+    hoist_targets[buffer] = {std::make_unique<u32[]>(pages), pages};
+}
+
+void Runtime::NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64 size) {
+    const auto it = hoist_targets.find(buffer);
+    if (it == hoist_targets.end() || size == 0) {
+        return;
+    }
+    const u32 tick = static_cast<u32>(scheduler.CurrentTick());
+    const u64 last = std::min((offset + size - 1) >> 12, it->second.pages - 1);
+    for (u64 page = offset >> 12; page <= last; ++page) {
+        std::atomic_ref<u32>(it->second.tick[page]).store(tick, std::memory_order_relaxed);
+    }
+}
+
+bool Runtime::HoistCopy(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
+                        std::span<const vk::BufferCopy> copies) {
+    if (!scheduler.IsRendering() || BbToggle::Disabled(BbToggle::UploadHoisting)) {
+        return false; // outside a pass an inline copy costs no pass break
+    }
+    const auto it = hoist_targets.find(dst);
+    if (it == hoist_targets.end()) {
+        return false;
+    }
+    const u32 tick = static_cast<u32>(scheduler.CurrentTick());
+    for (const auto& copy : copies) {
+        if (copy.size == 0) {
+            continue;
+        }
+        const u64 last = (copy.dstOffset + copy.size - 1) >> 12;
+        if (last >= it->second.pages) {
+            return false;
+        }
+        for (u64 page = copy.dstOffset >> 12; page <= last; ++page) {
+            if (std::atomic_ref<u32>(it->second.tick[page]).load(std::memory_order_relaxed) ==
+                tick) {
+                return false; // used earlier in this submission: the copy must stay in order
+            }
+        }
+    }
+    scheduler.RecordHoistedCopy(src->Handle(), dst->Handle(), copies);
+    BbStats::hoisted_copies.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 void Runtime::TickFrame() {
     staging_pool.TickFrame();
 }
@@ -812,6 +859,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
 
     memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
+    NoteSubmissionUse(handle, offset, size);
 }
 
 void Runtime::FlushBarriers(std::source_location where) {

@@ -110,6 +110,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     for (u64 page = 0; page < arena_pages; ++page) {
         address_space[first_page + page] = arena;
     }
+    runtime.RegisterHoistTarget(arena, arena_pages << ARENA_PAGE_BITS);
 #endif
 }
 
@@ -356,6 +357,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
     }
+    // bbport: index and vertex reads are not tracked as accesses; every use is (upload hoisting).
+    runtime.NoteSubmissionUse(arena, arena->Offset(device_addr), size);
     return {arena, arena->Offset(device_addr)};
 }
 
@@ -563,7 +566,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
 
-    if (src_buffer) {
+    if (src_buffer && !runtime.HoistCopy(src_buffer, arena, copies)) {
         runtime.CopyBuffer(src_buffer, arena, copies);
     }
     if (is_texel_buffer && !is_written) {

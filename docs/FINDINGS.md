@@ -206,8 +206,17 @@ Per frame: fragment 25.5 ms, vertex 5.5 ms, compute 2.2 ms (MetalFX ~0.5 ms, tes
 emulation ~0.3 ms). **Biggest single cost: ~20 passes per frame with no attachments and no pixel
 shader (vertex shaders that only write memory) kept the device-maximum render area, 16384×16384:
 ~0.3 ms of tiling each, ~6 ms per frame.** A 16×16 area for such passes: **27.5 → 33.9 FPS**,
-image unchanged (toggle `NoOutputPassArea`, bit 58). Next: the G-buffer pass (6 colour targets +
-D32S8 at 1280×720) is split ~15 times per frame, each split loading and storing all targets.
+image unchanged (toggle `NoOutputPassArea`, bit 58).
+
+**G-buffer splits** (`BB_PASS_STATS=1`): ~38 per frame reopen the same attachments; 76% came
+right after `CopyBuffer` (uploads of CPU-written guest data into the buffer arena, which Vulkan
+forbids inside a render pass). Upper bound measured by dropping in-pass copies (wrong image):
+43 FPS. **Upload hoisting** (toggle `UploadHoisting`, bit 59): an in-pass upload into arena pages
+nothing in the submission has used yet is recorded into an upload command buffer submitted ahead
+of the submission (barriers before and after), and the pass stays open: upload-caused splits
+983 → 560/s, **33.9 → 34.8 FPS**, image unchanged. The remaining splits follow uploads into pages
+already used in the submission (4 KiB tracking) and HLE copy shaders (`MultiCopy`, GPU data,
+not hoistable).
 
 **Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
 hours (new x86 processes hung in state U); it recovered on its own.

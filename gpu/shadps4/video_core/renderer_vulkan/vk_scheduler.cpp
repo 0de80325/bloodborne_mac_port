@@ -544,6 +544,30 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 #endif
 }
 
+void Scheduler::RecordHoistedCopy(vk::Buffer src, vk::Buffer dst,
+                                  std::span<const vk::BufferCopy> copies) {
+    std::scoped_lock lk{upload_mutex};
+    if (!upload_open) {
+        upload_cmdbuf = command_pool.Commit();
+        Check(upload_cmdbuf.begin(vk::CommandBufferBeginInfo{
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+        }));
+        // After everything submitted before (in-flight reads and writes of the same memory).
+        const vk::MemoryBarrier2 before = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+        };
+        upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &before,
+        });
+        upload_open = true;
+    }
+    upload_cmdbuf.copyBuffer(src, dst, static_cast<u32>(copies.size()), copies.data());
+}
+
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
@@ -585,13 +609,34 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pSignalSemaphoreValues = info.signal_ticks.data(),
     };
 
+    // bbport: hoisted uploads run first, then this submission's commands see them.
+    std::unique_lock upload_lock{upload_mutex};
+    std::array<vk::CommandBuffer, 2> cmdbufs{current_cmdbuf, {}};
+    u32 num_cmdbufs = 1;
+    if (upload_open) {
+        const vk::MemoryBarrier2 after = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &after,
+        });
+        Check(upload_cmdbuf.end());
+        cmdbufs = {upload_cmdbuf, current_cmdbuf};
+        num_cmdbufs = 2;
+        upload_open = false;
+    }
+
     const vk::SubmitInfo submit_info = {
         .pNext = &timeline_si,
         .waitSemaphoreCount = info.num_wait_semas,
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
-        .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
+        .commandBufferCount = num_cmdbufs,
+        .pCommandBuffers = cmdbufs.data(),
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
@@ -602,6 +647,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
+    upload_lock.unlock();
 
     // Apply pending operations
     PopPendingOperations();

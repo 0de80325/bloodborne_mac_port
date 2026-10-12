@@ -68,6 +68,10 @@ enum : std::uint64_t {
     /// Passes with no attachments and no pixel shader use a 16x16 render area instead of the
     /// device maximum (16384x16384, ~0.3 ms of tiling each on Apple GPUs); bit set: maximum.
     NoOutputPassArea = 1ull << 58,
+    /// Uploads into buffers inside a render pass run ahead of the submission when nothing in
+    /// it used their destination yet (Runtime::HoistCopy), instead of ending the pass; bit set:
+    /// every upload ends the pass.
+    UploadHoisting = 1ull << 59,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
@@ -85,6 +89,8 @@ inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0}, flips{0};
+/// bbport: uploads recorded ahead of their submission (Runtime::HoistCopy).
+inline std::atomic<std::uint64_t> hoisted_copies{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

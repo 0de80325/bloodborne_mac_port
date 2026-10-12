@@ -700,6 +700,12 @@ public:
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
+    /// bbport: records a buffer copy into this submission's upload command buffer, which runs
+    /// before all of its commands (Runtime::HoistCopy decides when that is safe). Copies there do
+    /// not end the current render pass: on a tile-based GPU every reopened pass reloads its
+    /// attachments.
+    void RecordHoistedCopy(vk::Buffer src, vk::Buffer dst, std::span<const vk::BufferCopy> copies);
+
     /// Ends current rendering scope. bbport: the caller is counted with BB_PASS_STATS=1.
     void EndRendering(std::source_location where = std::source_location::current(),
                       const char* detail = "");
@@ -883,6 +889,9 @@ public:
     }
 
     static std::mutex submit_mutex;
+    std::mutex upload_mutex;          ///< bbport: upload_cmdbuf and command pool commits
+    vk::CommandBuffer upload_cmdbuf{}; ///< bbport: this submission's hoisted copies
+    bool upload_open{};
 
 private:
     void AllocateWorkerCommandBuffers();
