@@ -65,9 +65,12 @@ static void lost_locked(const char *why) {
     if (!alive) return;
     alive = 0;
     if (rendering) {
-        printf("GPU process: host lost (%s) while rendering; exiting\n", why);
+        /* The host exits 0 when its window is closed: the player quit. */
+        const int quit = strstr(why, "exited with status 0") != NULL;
+        if (quit) printf("GPU process: game window closed; exiting\n");
+        else printf("GPU process: host lost (%s) while rendering; exiting\n", why);
         fflush(stdout);
-        _exit(1);
+        _exit(quit ? 0 : 1);
     }
     printf("GPU process: host lost (%s); continuing single-process\n", why);
 }
