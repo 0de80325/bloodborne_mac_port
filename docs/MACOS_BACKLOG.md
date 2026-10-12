@@ -18,10 +18,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   intermittent. Instrumented: the window loop now prints which SDL event closed it ("Window: …"),
   the host prints when its run loop returns, and SDL no longer turns SIGINT/SIGTERM into a quit
   event in the host (a signal now shows as a signal). Next occurrence: read those lines.
-- **Shader/pipeline compile stutter on first sight of effects** (attacks, blood): compiles block the
-  frame. The pipeline cache was invalidated on 2026-10-12 (SRT walker format), so effects recompile
-  once. *Proper:* compile in the background with a fallback (skip the draw or use a generic
-  pipeline) as other emulators do.
+- **Shader/pipeline compile stutter.** *Fixed 2026-10-13 (main cause):* the pipeline cache was
+  wiped at every launch (one entry that failed to preload cleared everything), so ~500 pipelines
+  compiled again each session, many mid-game (attacks, effects). Now only old-format entries clear
+  it; the next session preloaded 226 of 227 and compiled 2 during play (was 517). Both processes
+  use `<data>/user` (`run.sh` exports `BB_GPU_USER_DIR`; the host used to fall back to
+  `~/Library/Application Support/shadPS4`). *Remaining:* a pipeline never seen before still
+  compiles on first sight and blocks the frame — compile in the background with a fallback.
 
 - **Shader-side buffer bounds checks (MoltenVK has no `robustBufferAccess2`).**
   *Now:* on macOS the device is created without `robustBufferAccess2`/`nullDescriptor`

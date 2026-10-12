@@ -350,6 +350,7 @@ void PipelineCache::WarmUp() {
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
+    u32 num_old_format{};
 
     Storage::DataBase::Instance().ForEachBlob(
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
@@ -361,6 +362,7 @@ void PipelineCache::WarmUp() {
             u32 version{};
             pldata.Read(version);
             if (version != Serialization::PipelineKeyVersion) {
+                ++num_old_format;
                 return;
             }
 
@@ -379,11 +381,26 @@ void PipelineCache::WarmUp() {
             }
         });
 
-    LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
-    if (num_total_pipelines > num_pipelines) {
-        LOG_WARNING(Render, "{} stale pipelines were found: clearing cache to regenerate cleanly",
-                    num_total_pipelines - num_pipelines);
+    std::printf("Pipeline cache: preloaded %u of %u pipelines\n", num_pipelines,
+                num_total_pipelines);
+    // bbport: clear only for entries of an older format (a one-time migration). A pipeline that
+    // fails to preload (e.g. a permutation index from another session) compiles when first
+    // used; clearing for it wiped the whole cache every session (one such entry was always
+    // present), so every pipeline compiled again in every session: in-game stutter.
+    if (num_old_format) {
+        LOG_WARNING(Render, "{} pipelines of an older cache format: clearing the cache",
+                    num_old_format);
         Storage::DataBase::Instance().Clear();
+        // Clear removes the profile too: without it the next session would not preload.
+        std::vector<u8> profile_blob(sizeof(profile));
+        std::memcpy(profile_blob.data(), &profile, sizeof(profile));
+        Storage::DataBase::Instance().FinishPreload();
+        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
+                                           std::move(profile_blob));
+        return;
+    } else if (num_total_pipelines > num_pipelines) {
+        LOG_WARNING(Render, "{} cached pipelines could not be preloaded; they compile when used",
+                    num_total_pipelines - num_pipelines);
     }
 
     Storage::DataBase::Instance().FinishPreload();

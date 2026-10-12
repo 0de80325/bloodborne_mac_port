@@ -218,6 +218,15 @@ of the submission (barriers before and after), and the pass stays open: upload-c
 already used in the submission (4 KiB tracking) and HLE copy shaders (`MultiCopy`, GPU data,
 not hoistable).
 
+### Pipeline cache was wiped every launch (2026-10-13)
+
+Frame stats counted ~500 shader/pipeline compiles in every session in the same area (365 at the
+level load, the rest mid-game: the user's "shader stutter when attacking"). `PipelineCache::WarmUp`
+cleared the whole cache whenever any one cached pipeline failed to preload, and one always did. Now
+it clears only for old-format entries and re-saves the cache profile: next session **preloaded 226
+of 227 pipelines, 2 compiles during play** (was 517). The native host also used the wrong cache
+directory (`BB_GPU_USER_DIR` is read when the library loads; `run.sh` now exports it).
+
 **Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
 hours (new x86 processes hung in state U); it recovered on its own.
 

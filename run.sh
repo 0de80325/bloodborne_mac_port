@@ -26,6 +26,10 @@ fi
 out=$data/out
 mkdir -p "$out"
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
+# GPU caches (pipelines, shaders) next to the saves. Exported before anything starts: the GPU
+# library reads it while loading, in bb-probe and in the native GPU host alike.
+export BB_GPU_USER_DIR=${BB_GPU_USER_DIR:-${BB_USER_DIR:-$data/user}}
+mkdir -p "$BB_GPU_USER_DIR"
 # FSR 4.1.1 assets (tools/fsr4cap/build_assets.sh): next to run.sh or in the data directory.
 if [[ -z ${BB_FSR411_DIR:-} && ! -d fsr4_411 && -d $data/fsr4_411 ]]; then
     export BB_FSR411_DIR=$data/fsr4_411
