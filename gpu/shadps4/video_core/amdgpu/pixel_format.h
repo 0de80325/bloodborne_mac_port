@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdio>
 #include <string_view>
 #include <fmt/format.h>
 #include "common/assert.h"
@@ -314,6 +316,15 @@ constexpr CompMapping RemapSwizzle(const DataFormat format, const CompMapping sw
     }
 }
 
+/// bbport: MapNumberConversion's warning for SnormNz with an unexpected data format (once).
+inline void WarnSnormNzFormat(u32 data_fmt) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed)) {
+        std::fprintf(stderr, "GPU: SnormNz descriptor with data format %u: no conversion\n",
+                     data_fmt);
+    }
+}
+
 constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
                                                const DataFormat data_fmt) {
     switch (num_fmt) {
@@ -356,7 +367,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // bbport: was UNREACHABLE. A descriptor with an invalid or other data format reads as
+            // zeros on the GPU; one seen during a level load (data_fmt 0) killed the GPU host.
+            WarnSnormNzFormat(u32(data_fmt));
+            return NumberConversion::None;
         }
     }
     default:

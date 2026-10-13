@@ -436,6 +436,16 @@ the draw once it is spent. Images correct after the walk. Compute pipelines alwa
 The compile stats used the arm64 cycle counter as nanoseconds: right on the M4 (1 GHz), 41×
 too low on M1–M3 (24 MHz); they use `steady_clock` now.
 
+### Load crashes, 62-load hunt (2026-10-14)
+
+Scripted save loads (`BB_PAD_FILE`, Continue twice) with an empty pipeline cache, as in the two
+"Bad PM4 packet" crashes of 2026-10-13 evening: **62 loads, no bad packet**: 42 with a ring of
+every `libSceGnmDriver` call (pointer, size, result, thread) and 20 without, each DCB/CCB
+walked at submit in the game process, each arena copy hashed when the host receives it. One
+other crash: `MapNumberConversion` UNREACHABLE for an SnormNz descriptor with data format 0
+during the load (now a one-time warning; reads as zeros on the GPU). The bad packet's two
+diagnostics stay on for the next occurrence (MACOS_BACKLOG).
+
 ## Part 3 — Open issues
 
 | Issue | Status |

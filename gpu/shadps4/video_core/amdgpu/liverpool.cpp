@@ -43,6 +43,7 @@
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 namespace Libraries::GnmDriver {
 bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes);
+void BbArenaVerify(uintptr_t copy);
 }
 
 namespace AmdGpu {
@@ -128,6 +129,7 @@ static void CompareWithGuestBuffer(uintptr_t base, uintptr_t at) {
     if (!Libraries::GnmDriver::BbArenaSource(base, &guest, &bytes)) {
         return;
     }
+    Libraries::GnmDriver::BbArenaVerify(base);
     std::vector<u32> now(bytes / 4);
     mach_vm_size_t got = 0;
     if (mach_vm_read_overwrite(mach_task_self(), guest, bytes,

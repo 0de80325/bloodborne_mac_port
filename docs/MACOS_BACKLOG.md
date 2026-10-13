@@ -38,6 +38,18 @@ Each item: what was done for now, what the refinement is, and where it lives.
   different size than the game reserves (our HLE `sceGnmSetCsShader*`/dispatch functions, or a
   patch). The diagnostic's guest-buffer comparison crashed the host before (a declaration inside
   `namespace AmdGpu` resolved to a null call through `-undefined dynamic_lookup`): fixed.
+  *2026-10-14, hunted:* not reproduced in **62 cold-cache save loads** since (42 with a ring of
+  every `libSceGnmDriver` call, 20 without), so the recorder's timing does not hide it. Left in
+  place, cheap: each DCB/CCB is walked at submit in the game process ("Gnm check: bad packet …",
+  with the library calls that wrote near the bad word; `BB_GNM_TRACE=0` turns the call ring
+  off), and the host records each arena copy's sequence number and hash on arrival, so the next
+  "Bad PM4 packet" says whether its copy changed after it arrived (arena reused mid-parse) or
+  was already bad at submit. Next occurrence: read those two lines first.
+- **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
+  host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
+  the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
+  *Remaining:* find which descriptor carries it (stale table read, or a legitimately unused
+  slot).
 - **Gameplay judder with no compiles (2026-10-13).** The player sees occasional judder at a
   steady 60/61 FPS. Automated runs standing in the city show a worst frame of 20–25 ms in every
   5 s window (median 16.67, p99 17–22 ms) with zero shader compiles; the title screen has none.

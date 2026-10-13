@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
+#include <pthread.h>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+#include <xxhash.h>
+
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -103,6 +111,117 @@ static void WaitGpuIdle() {
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 
+// bbport: "Unimplemented PM4 type" crashes (MACOS_BACKLOG). Every libSceGnmDriver call that
+// takes (cmdbuf, size) is recorded in a ring (TracedCall), and each command buffer is checked at
+// submit (CheckCommandBuffer): a broken packet stream is reported here, in the game's process,
+// with the library calls that wrote around the bad word.
+namespace {
+struct GnmCall {
+    const char* name;
+    u64 cmdbuf, size, seq, thread;
+    s64 result;
+};
+constexpr u64 GnmCallRing = 16384;
+GnmCall gnm_calls[GnmCallRing];
+std::atomic<u64> gnm_call_seq{0};
+
+u64 TraceThreadId() {
+    thread_local const u64 id = [] {
+        u64 value = 0;
+        pthread_threadid_np(nullptr, &value);
+        return value;
+    }();
+    return id;
+}
+
+void RecordGnmCall(const char* name, u64 cmdbuf, u64 size, s64 result) {
+    const u64 seq = gnm_call_seq.fetch_add(1, std::memory_order_relaxed);
+    gnm_calls[seq % GnmCallRing] = {name, cmdbuf, size, seq, TraceThreadId(), result};
+}
+
+template <auto F>
+struct TracedCall;
+template <typename R, typename... A, R(PS4_SYSV_ABI* F)(A...)>
+struct TracedCall<F> {
+    static inline const char* name = "?";
+    static R PS4_SYSV_ABI Call(A... args) {
+        if constexpr (sizeof...(A) >= 2 && !std::is_void_v<R>) {
+            using First = std::tuple_element_t<0, std::tuple<A...>>;
+            using Second = std::tuple_element_t<1, std::tuple<A...>>;
+            if constexpr (std::is_pointer_v<First> && std::is_integral_v<Second>) {
+                const auto tuple = std::forward_as_tuple(args...);
+                const R result = F(args...);
+                s64 value = 0;
+                if constexpr (std::is_integral_v<R>) {
+                    value = s64(result);
+                }
+                RecordGnmCall(name, reinterpret_cast<u64>(std::get<0>(tuple)),
+                              u64(std::get<1>(tuple)), value);
+                return result;
+            }
+        }
+        return F(args...);
+    }
+};
+
+/// Walks a command buffer's packet headers; the dword index of the first invalid one, or -1.
+s64 FirstBadPacket(const u32* words, u64 count) {
+    u64 i = 0;
+    while (i < count) {
+        const u32 type = words[i] >> 30;
+        if (type == 2) {
+            ++i;
+        } else if (type == 3) {
+            i += ((words[i] >> 16) & 0x3fff) + 2;
+        } else {
+            return s64(i);
+        }
+    }
+    return -1;
+}
+
+void CheckCommandBuffer(const char* kind, const u32* buffer, u32 bytes) {
+    if (!buffer || bytes < 4) {
+        return;
+    }
+    const s64 bad = FirstBadPacket(buffer, bytes / 4);
+    if (bad < 0) {
+        return;
+    }
+    const u64 base = reinterpret_cast<u64>(buffer);
+    const u64 at = base + u64(bad) * 4;
+    std::fprintf(stderr,
+                 "Gnm check: bad packet in %s %#llx (%u bytes) at word %lld (%#llx) at submit; "
+                 "thread %llu\n  words:",
+                 kind, (unsigned long long)base, bytes, (long long)bad, (unsigned long long)at,
+                 (unsigned long long)TraceThreadId());
+    for (s64 i = std::max<s64>(0, bad - 12); i < std::min<s64>(bytes / 4, bad + 8); ++i) {
+        std::fprintf(stderr, "%s%08x%s", i == bad ? " [" : " ", buffer[i], i == bad ? "]" : "");
+    }
+    // Library calls that wrote into this buffer before the bad word, newest last.
+    const u64 newest = gnm_call_seq.load(std::memory_order_relaxed);
+    std::vector<GnmCall> hits;
+    for (u64 seq = newest > GnmCallRing ? newest - GnmCallRing : 0; seq < newest; ++seq) {
+        const GnmCall& call = gnm_calls[seq % GnmCallRing];
+        if (call.seq == seq && call.cmdbuf >= base && call.cmdbuf < base + bytes) {
+            hits.push_back(call);
+        }
+    }
+    std::fprintf(stderr, "\n  %zu library calls wrote into this buffer (last 16k calls); "
+                         "around the bad word:\n", hits.size());
+    for (const GnmCall& call : hits) {
+        const s64 word = s64(call.cmdbuf - base) / 4;
+        if (word >= bad - 64 && word <= bad + 16) {
+            std::fprintf(stderr, "    word %lld: %s(size %llu) -> %lld, thread %llu, call %llu\n",
+                         (long long)word, call.name, (unsigned long long)call.size,
+                         (long long)call.result, (unsigned long long)call.thread,
+                         (unsigned long long)call.seq);
+        }
+    }
+    std::fflush(stderr);
+}
+} // namespace
+
 // bbport: command buffer copies for the GPU host (host/bbgpu_shared.h arena). The game may rewrite
 // a command buffer once the submit returns; the host parses later, so it parses a copy made here.
 // The arena restarts after each SubmitDone: the next submit waits for its GpuIdle, by which time
@@ -113,8 +232,9 @@ static bool arena_restart;
 /// bbport: precedes each copy in the arena (one 256-byte slot): where it was copied from, so a
 /// bad packet in a copy can be compared with the game's buffer (BbArenaSource, DumpBadPacket).
 struct ArenaCopyHeader {
-    u64 magic, guest, bytes;
+    u64 magic, guest, bytes, seq; ///< seq: copies made so far (arena reuse checks)
 };
+static u64 arena_copies;
 static constexpr u64 ArenaCopyMagic = 0x59504f4342434242ull; // "BBCBCOPY"
 static constexpr u64 ArenaHeaderSlot = 256;
 
@@ -136,7 +256,8 @@ static s64 CopyToArena(const u32* source, u32 bytes) {
         return -1;
     }
     auto* arena = reinterpret_cast<u8*>(BbSplit::Shared()) + BBGPU_ARENA_OFFSET;
-    const ArenaCopyHeader header{ArenaCopyMagic, reinterpret_cast<u64>(source), bytes};
+    const ArenaCopyHeader header{ArenaCopyMagic, reinterpret_cast<u64>(source), bytes,
+                                 ++arena_copies};
     std::memcpy(arena + arena_used, &header, sizeof(header));
     const s64 offset = s64(arena_used + ArenaHeaderSlot);
     std::memcpy(arena + offset, source, bytes);
@@ -164,6 +285,46 @@ bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes) {
     return true;
 }
 
+// bbport: arena copies as the host received them (BbSplitHost), so a bad packet can tell whether
+// its copy changed after it arrived (the arena reused while the host still parsed it).
+namespace {
+struct ReceivedCopy {
+    uintptr_t copy;
+    u64 bytes, seq, hash;
+};
+constexpr u32 ReceivedRing = 1024;
+ReceivedCopy received[ReceivedRing];
+u32 received_next;
+
+void NoteReceivedCopy(const u32* copy, u64 bytes) {
+    ArenaCopyHeader header;
+    std::memcpy(&header, reinterpret_cast<const u8*>(copy) - ArenaHeaderSlot, sizeof(header));
+    received[received_next++ % ReceivedRing] = {reinterpret_cast<uintptr_t>(copy), bytes,
+                                                header.seq, XXH3_64bits(copy, bytes)};
+}
+} // namespace
+
+/// Host side: compares an arena copy with how it arrived; prints the result.
+void BbArenaVerify(uintptr_t copy) {
+    for (u32 i = 0; i < ReceivedRing; ++i) {
+        const ReceivedCopy& r = received[(received_next - 1 - i) % ReceivedRing];
+        if (r.copy != copy) {
+            continue;
+        }
+        ArenaCopyHeader header;
+        std::memcpy(&header, reinterpret_cast<const u8*>(copy) - ArenaHeaderSlot, sizeof(header));
+        const u64 hash = XXH3_64bits(reinterpret_cast<const void*>(copy), r.bytes);
+        std::fprintf(stderr,
+                     "  arena copy as received: copy #%llu, %llu bytes; now: copy #%llu, "
+                     "contents %s (%u receipts ago)\n",
+                     (unsigned long long)r.seq, (unsigned long long)r.bytes,
+                     (unsigned long long)header.seq, hash == r.hash ? "unchanged" : "CHANGED", i);
+        return;
+    }
+    std::fprintf(stderr, "  arena copy %#lx: not among the last %u received\n",
+                 (unsigned long)copy, ReceivedRing);
+}
+
 // bbport: the game's side of the GPU process split (bbport_split.h). Validation and the
 // submission lock stay here; the work goes to the host in submit records, in order.
 static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_sizes_in_bytes,
@@ -189,6 +350,12 @@ static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_si
             record.dcb_bytes[i] = dcb_sizes_in_bytes[done + i];
             record.ccb[i] = ccb_gpu_addrs ? reinterpret_cast<u64>(ccb_gpu_addrs[done + i]) : 0;
             record.ccb_bytes[i] = ccb_sizes_in_bytes ? ccb_sizes_in_bytes[done + i] : 0;
+        }
+        for (u32 i = 0; i < n; ++i) {
+            CheckCommandBuffer("DCB", reinterpret_cast<const u32*>(record.dcb[i]),
+                               record.dcb_bytes[i]);
+            CheckCommandBuffer("CCB", reinterpret_cast<const u32*>(record.ccb[i]),
+                               record.ccb_bytes[i]);
         }
         // Copy the whole record's buffers, or none (the host reads one kind of address).
         u64 copies[2][BBGPU_SUBMIT_MAX];
@@ -3102,7 +3269,20 @@ int PS4_SYSV_ABI Func_F916890425496553() {
     return ORBIS_OK;
 }
 
+// bbport: register through TracedCall (CheckCommandBuffer reports which calls wrote a buffer).
+#undef LIB_FUNCTION
+#define LIB_FUNCTION(nid, lib, libversion, mod, function)                                          \
+    do {                                                                                           \
+        TracedCall<&function>::name = #function;                                                   \
+        sym->AddSymbol(nid, lib, mod, Core::Loader::SymbolType::Function,                         \
+                       trace_calls ? reinterpret_cast<u64>(&TracedCall<&function>::Call)           \
+                                   : reinterpret_cast<u64>(&function));                            \
+    } while (0)
+
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
+    // BB_GNM_TRACE=0 registers the functions directly (no call ring).
+    const char* trace_env = std::getenv("BB_GNM_TRACE");
+    const bool trace_calls = !trace_env || trace_env[0] != '0';
     // bbport: the game's side of the process split has no GPU: the host runs Liverpool.
     if (!BbSplit::Remote()) {
         LOG_INFO(Lib_GnmDriver, "Initializing presenter");
@@ -3497,6 +3677,7 @@ bool BbSplitHost(const BbGpuRecord* r) {
             if (s.copied) {
                 dcb[i] = reinterpret_cast<u32*>(arena + s.dcb[i]);
                 ccb[i] = s.ccb[i] == ~u64(0) ? nullptr : reinterpret_cast<u32*>(arena + s.ccb[i]);
+                NoteReceivedCopy(dcb[i], s.dcb_bytes[i]);
             } else {
                 dcb[i] = reinterpret_cast<u32*>(s.dcb[i]);
                 ccb[i] = reinterpret_cast<u32*>(s.ccb[i]);
