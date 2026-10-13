@@ -82,7 +82,7 @@ fps=${BB_FPS:-uncap}
 if [[ -z ${BB_RENDER_RES:-} ]]; then
     read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled --settings "$BB_CONFIG") || true
 fi
-live=0
+live=0 above_1080=0
 if [[ -n ${scaled_output:-} ]]; then
     live=${BB_LIVE_RES:-}
     # Bash builtins only: the AppImage's PATH has no sed/grep (a missing one ended run.sh silently).
@@ -99,8 +99,15 @@ if [[ -n ${scaled_output:-} ]]; then
             [[ $line == *MANGOHUD* ]] || printf '%s\n' "$line"; done >&2)) || live=0
     fi
     [[ $live == 1 ]] || live=0
+    # Above 1920x1080 the startup patch breaks the scene's geometry (stretched polygons across
+    # the screen, seen at 2560x1440 on macOS in both process modes): the live path keeps the
+    # game's buffers at 1080p and renders host targets at the size instead.
+    IFS=x read -r render_w render_h <<< "$scaled_render"
+    if (( render_w > 1920 || render_h > 1080 )); then live=1 above_1080=1; fi
 fi
-if [[ $live == 1 ]]; then
+if [[ $live == 1 && $above_1080 == 1 ]]; then
+    echo "Output ${scaled_output}: scene ${scaled_render} through live resolution changes (the startup patch breaks scenes above 1080p)"
+elif [[ $live == 1 ]]; then
     echo "Output ${scaled_output}: live resolution changes (live_resolution=0: startup patch)"
 elif [[ -n ${scaled_output:-} ]]; then
     export BB_RENDER_RES=$scaled_render BB_OUTPUT_RES=$scaled_output BB_AUTO_RENDER_RES=1
