@@ -227,6 +227,39 @@ it clears only for old-format entries and re-saves the cache profile: next sessi
 of 227 pipelines, 2 compiles during play** (was 517). The native host also used the wrong cache
 directory (`BB_GPU_USER_DIR` is read when the library loads; `run.sh` now exports it).
 
+### "Precise" float math made every pixel shader unoptimizable on Metal (2026-10-13)
+
+`MVK_CONFIG_SHADER_DUMP_DIR=<dir>` (with an empty `BB_GPU_USER_DIR`, so every shader converts)
+dumps the SPIR-V and MSL; the pass log names each pass's shaders, and matching the SPIR-V bytes
+of `<user>/cache/*.spv` to the dump maps guest hashes to MSL. The hottest G-buffer pixel shader
+(1.8 ms/frame) did every float add, multiply and FMA through `spvFAdd`/`spvFMul` helpers marked
+`[[clang::optnone]]`: SPIRV-Cross's translation of SPIR-V `NoContraction`, which the recompiler
+put on every FP add/sub/mul/fma (`emit_spirv_floating_point.cpp`) — in 223 of 308 shaders.
+Now only vertex/tessellation/geometry stages keep it (positions must match bit for bit across
+the passes that draw the same geometry: depth prepass, G-buffer, shadows):
+
+| Respawn spot, Central Yharnam (1379 draws/frame) | FPS | GPU busy/frame | fragment | vertex | compute |
+|---|---|---|---|---|---|
+| precise everywhere (before) | 39.4 | 19.6 ms | 13.4 | 5.3 | 2.3 |
+| precise in vertex stages only (now) | 60 (vsync cap) | 12.1 ms | 3.7 | 7.2 | 2.4 |
+| precise nowhere + invariant position | 60 (vsync cap) | 12.4 ms | 5.4 | 5.1 | 3.5 |
+
+(Per-stage times overlap on a tile-based GPU; the union "GPU busy" is the comparable number.)
+Dropping it from vertex shaders too gains nothing more, so they keep it. Screenshots are the same
+(mean difference 3.9/255, MetalFX history and idle animation). Single-process mode: 60 FPS too.
+The scene is now held by the 60 Hz present, with the GPU ~72% busy. `BB_SPIRV_PRECISE=all`
+(with a fresh shader cache) restores the old code. This corrects the 2026-10-11 conclusion that
+the remaining fragment time was "real shading": most of it was this.
+
+Instruments' GPU limiter counters cannot be recorded headless: the Metal System Trace template's
+`counterprofile` values 1–3 are "not supported on target device", and the default profile records
+only "RT Unit Active".
+
+**Host crash found while profiling (fixed):** hoisted uploads (`Scheduler::RecordHoistedCopy`) were
+recorded on the draw thread into a command buffer from the same `VkCommandPool` the recorder thread
+was recording into; MoltenVK allocates command objects per pool, so the host died with SIGSEGV in
+`MVKCmdCopyBuffer::setContent` (address 0x20). Upload command buffers now come from their own pool.
+
 **Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
 hours (new x86 processes hung in state U); it recovered on its own.
 
@@ -235,7 +268,7 @@ hours (new x86 processes hung in state U); it recovered on its own.
 | Issue | Status |
 |---|---|
 | CPU-bound draw recording at 720p | Next: re-profile at 720p to see what dominates now |
-| Intermittent "Unimplemented PM4 type 0" / bad fence packets on loading a save | **Root cause found 2026-10-12:** the game rewrites command buffers after the submit returns, before the (asynchronous) parser reads them. Split mode (default) now copies DCB/CCB at submit into a shared arena: 0 crashes in 5 stressed save loads (was 2 in 3). Single-process mode still parses the game's memory (smaller window): backlog |
+| Intermittent "Unimplemented PM4 type 0" / bad fence packets on loading a save | **Root cause found 2026-10-12:** the game rewrites command buffers after the submit returns, before the (asynchronous) parser reads them. Split mode (default) now copies DCB/CCB at submit into a shared arena: 0 crashes in 5 stressed save loads (was 2 in 3). Single-process mode still parses the game's memory (smaller window): backlog. **Seen again 2026-10-13 in split mode** (1 in ~8 runs, at load): not fully fixed |
 | Character half-rendered after quitting to the menu and reloading | Logged (backlog, Stability) |
 | Ghosting halo around the character in character creation | Logged; null image stand-ins not done yet |
 | MetalFX distant shimmer | Try `BB_METALFX_JITTER_SIGN=-1`; jitter must be on |

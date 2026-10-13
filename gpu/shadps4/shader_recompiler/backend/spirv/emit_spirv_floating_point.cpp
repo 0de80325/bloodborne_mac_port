@@ -4,10 +4,29 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace Shader::Backend::SPIRV {
 
+// bbport: NoContraction ("precise") only where results must be bit-identical across shaders:
+// positions, so depth prepasses and later passes agree. SPIRV-Cross turns each precise add,
+// multiply and FMA into a call to an [[clang::optnone]] helper, which the Metal compiler cannot
+// optimize: on every fragment and compute shader that cost the city scene 19.6 -> 12.1 ms of
+// GPU time per frame. BB_SPIRV_PRECISE=all restores it everywhere (with a fresh shader cache).
+static bool PreciseEverywhere() {
+    static const bool all = [] {
+        const char* env = std::getenv("BB_SPIRV_PRECISE");
+        return env && !std::strcmp(env, "all");
+    }();
+    return all;
+}
+
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
-    ctx.Decorate(op, spv::Decoration::NoContraction);
+    if (PreciseEverywhere() ||
+        (ctx.sw_stage != SwStage::Fragment && ctx.sw_stage != SwStage::Compute)) {
+        ctx.Decorate(op, spv::Decoration::NoContraction);
+    }
     return op;
 }
 

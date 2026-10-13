@@ -26,6 +26,14 @@ Each item: what was done for now, what the refinement is, and where it lives.
   `~/Library/Application Support/shadPS4`). *Remaining:* a pipeline never seen before still
   compiles on first sight and blocks the frame — compile in the background with a fallback.
 
+- **"Unimplemented PM4 type 0" seen again in split mode (2026-10-13).** Once in ~8 runs, while
+  loading into the level (`liverpool.cpp:820`, base reg 530), despite the command-buffer copy
+  arena. Find which buffer is still read from guest memory after the submit (CCB? indirect
+  buffers / `IndirectBuffer` packets pointing into game memory are not copied).
+- **Pipelines Metal rejects: "cannot reserve 'buffer' resource location at index 0".** A few
+  pipelines (e.g. `fs_e21e283a,vs_3deaa573`) fail to compile in MoltenVK and their draws are
+  skipped (missing geometry). Likely a vertex buffer binding colliding with a descriptor buffer
+  index in MSL; check MoltenVK's vertex-buffer index assignment for these pipelines.
 - **Shader-side buffer bounds checks (MoltenVK has no `robustBufferAccess2`).**
   *Now:* on macOS the device is created without `robustBufferAccess2`/`nullDescriptor`
   (`vk_instance.cpp`), and null buffer bindings use a small zero-filled dummy buffer
@@ -80,6 +88,14 @@ Each item: what was done for now, what the refinement is, and where it lives.
   interpreter). *Proper:* zero only for the walk that faulted, if repeated faults are cheap enough.
 
 ## 2. Performance
+
+- **Fixed 2026-10-13 (biggest win so far):** `NoContraction` on every float op became
+  `[[clang::optnone]]` helper calls in MSL; dropped in fragment/compute shaders: city respawn
+  spot 39 → 60 FPS (vsync cap), GPU 19.6 → 12.1 ms/frame. *Remaining:* vertex stages keep it
+  (needed for matching positions across passes); building MoltenVK with a SPIRV-Cross that emits
+  precise ops without `optnone` (or `invariant` positions) would remove it there too — measured
+  no further gain today, so low priority. The game is now limited by the 60 Hz present: try 120 Hz
+  displays / `BB_FPS_LIMIT` and re-profile the CPU side.
 
 - **Render-pass breaks on a tile-based GPU (biggest lever, 2026-10-11).** Metal System Trace
   (`xcrun xctrace record --template "Metal System Trace" --attach <pid> --time-limit 3s`) in a

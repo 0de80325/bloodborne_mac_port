@@ -109,6 +109,10 @@ per-draw work ~21%, host-copy spin ~12%) caps it. `MVK_CONFIG_SYNCHRONOUS_QUEUE_
 nothing measurable. MetalFX needs synchronous submits (commit order on MoltenVK's queue).
 Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini` via BB_CONFIG.
 
+**2026-10-13:** fragment/compute shaders no longer use SPIR-V `NoContraction` (MoltenVK made each
+float op an unoptimizable `optnone` call): city respawn spot 39 → 60 FPS (vsync-capped), GPU
+19.6 → 12.1 ms/frame. Shader dumps: `MVK_CONFIG_SHADER_DUMP_DIR` (see FINDINGS).
+
 ## Next steps (in order)
 
 1. **Native arm64 GPU process** (docs/DESIGN_NATIVE_GPU_PROCESS.md): M0 spike passed (1.75× on
