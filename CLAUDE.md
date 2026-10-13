@@ -112,6 +112,9 @@ Benchmark settings: `out/macdata/bench-{native,fsr3-quality,metalfx-quality}.ini
 **2026-10-13:** fragment/compute shaders no longer use SPIR-V `NoContraction` (MoltenVK made each
 float op an unoptimizable `optnone` call): city respawn spot 39 → 60 FPS (vsync-capped), GPU
 19.6 → 12.1 ms/frame. Shader dumps: `MVK_CONFIG_SHADER_DUMP_DIR` (see FINDINGS).
+Target (user): locked 60 FPS at the highest resolution (M4 Max: 1440p native, 4K upscaled).
+M4 Max now: 1080p native ~62 uncapped, 1440p 49, 4K MetalFX Quality 43; scenes above 1080p use
+the live path (the startup patch breaks geometry there). Check screenshots when benchmarking.
 
 ## Next steps (in order)
 

@@ -251,6 +251,38 @@ The scene is now held by the 60 Hz present, with the GPU ~72% busy. `BB_SPIRV_PR
 (with a fresh shader cache) restores the old code. This corrects the 2026-10-11 conclusion that
 the remaining fragment time was "real shading": most of it was this.
 
+### Resolution targets on the M4 Max (2026-10-13, Central Yharnam respawn spot)
+
+Target: a locked 60 FPS (the game's physics run at 30 Hz; more is not wanted), as high a
+resolution as that allows. Uncapped for measurement: `BB_PRESENT_MODE=Immediate BB_FPS_LIMIT=0`.
+
+| Output | Scene | Path | FPS uncapped | Limit |
+|---|---|---|---|---|
+| 1080p MetalFX Quality (default) | 1280x720 | startup patch | 65–77 (60 locked) | draw recording thread |
+| 1080p native | 1920x1080 | — | 61–63 | draw recording thread |
+| 4K MetalFX Performance | 1916x1078 | startup patch | ~52 | draw recording thread (GPU 69% busy) |
+| 1440p native | 2560x1440 | live | 49 | GPU (~17.5 ms of a 19–20 ms frame) |
+| 4K MetalFX Quality | 2560x1440 | live | 43 | GPU |
+
+- **The startup resolution patch breaks scenes above 1080p** (2560x1440: polygons stretched across
+  the screen, both process modes; 1916x1078 is fine). `run.sh` now takes the live path above
+  1080p, which renders correctly. Earlier 1440p/4K-Quality numbers (33/30 FPS) measured the broken
+  image.
+- Draw recording thread (`bb:DrawRec`, 1080p native): 43% in `vkQueueSubmit` (MoltenVK encodes
+  Metal commands there), 12% beginning Metal render passes, ~4% MoltenVK formatting encoder
+  labels from command buffer names (now unnamed). `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`: no
+  gain (62 vs 62 FPS). `BB_FRAMES_AHEAD=2`: no gain at 1440p (49.2 vs 49.1).
+- Frame times snap to 480 Hz vblank ticks (2.08 ms): 49 FPS is 10 ticks per frame.
+- Dropping NoContraction from vertex shaders too ("precise nowhere", with invariant positions)
+  broke geometry: some vertex shaders need exact rounding. Vertex stages keep it.
+
+**Pipeline cache permutations (fixed):** Metal rejected 6 pipelines per session once the cache was
+kept between sessions ("cannot reserve 'buffer' resource location at index 0"): a new shader
+permutation took the index of a stored one the session had not loaded and overwrote it, and
+pipelines saved earlier then loaded a shader numbered for other bindings; their draws were
+skipped (part of a G-buffer pass). Also, permutations of shaders whose resources were all null
+ignored their first binding. Four sessions alternating 720p/1440p: 0 rejected.
+
 Instruments' GPU limiter counters cannot be recorded headless: the Metal System Trace template's
 `counterprofile` values 1–3 are "not supported on target device", and the default profile records
 only "RT Unit Active".

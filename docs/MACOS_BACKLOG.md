@@ -30,10 +30,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   loading into the level (`liverpool.cpp:820`, base reg 530), despite the command-buffer copy
   arena. Find which buffer is still read from guest memory after the submit (CCB? indirect
   buffers / `IndirectBuffer` packets pointing into game memory are not copied).
-- **Pipelines Metal rejects: "cannot reserve 'buffer' resource location at index 0".** A few
-  pipelines (e.g. `fs_e21e283a,vs_3deaa573`) fail to compile in MoltenVK and their draws are
-  skipped (missing geometry). Likely a vertex buffer binding colliding with a descriptor buffer
-  index in MSL; check MoltenVK's vertex-buffer index assignment for these pipelines.
+- **Fixed 2026-10-13: pipelines Metal rejected after a cached session** ("cannot reserve
+  'buffer' resource location"): shader permutation indices reused across sessions. *Remaining:*
+  one pixel shader (`fs_fbe7c4b6`) has two cached permutations that compare equal ("conflicts
+  with index 1"), so one pipeline compiles each session.
+- **Startup resolution patch above 1080p breaks geometry** (2560x1440). *Now:* `run.sh` uses the
+  live path above 1080p. *Proper fix:* find which game buffer the patch outgrows (the live path
+  keeps guest targets at 1080p and costs proxy copies).
 - **Shader-side buffer bounds checks (MoltenVK has no `robustBufferAccess2`).**
   *Now:* on macOS the device is created without `robustBufferAccess2`/`nullDescriptor`
   (`vk_instance.cpp`), and null buffer bindings use a small zero-filled dummy buffer
@@ -89,6 +92,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
 
 ## 2. Performance
 
+- **Resolution targets (user, 2026-10-13): locked 60 FPS; M4 Max 1440p native and 4K
+  upscaled, base M5 1080p native, smaller Macs 1080p upscaled.** M4 Max today: 1080p native
+  61–63, 4K Performance ~52, 1440p 49, 4K Quality 43 (FINDINGS). Two levers: (a) the draw
+  recording thread (MoltenVK encoding in `vkQueueSubmit` ~43%, render pass begins ~12%) caps
+  1080p-class scenes at ~62–67 FPS; (b) GPU time at 1440p (~17.5 ms; 60 needs ≤ ~15 ms).
 - **Fixed 2026-10-13 (biggest win so far):** `NoContraction` on every float op became
   `[[clang::optnone]]` helper calls in MSL; dropped in fragment/compute shaders: city respawn
   spot 39 → 60 FPS (vsync cap), GPU 19.6 → 12.1 ms/frame. *Remaining:* vertex stages keep it
