@@ -110,13 +110,21 @@ static void WaitGpuIdle() {
 static u64 arena_used;
 static bool arena_restart;
 
+/// bbport: precedes each copy in the arena (one 256-byte slot): where it was copied from, so a
+/// bad packet in a copy can be compared with the game's buffer (BbArenaSource, DumpBadPacket).
+struct ArenaCopyHeader {
+    u64 magic, guest, bytes;
+};
+static constexpr u64 ArenaCopyMagic = 0x59504f4342434242ull; // "BBCBCOPY"
+static constexpr u64 ArenaHeaderSlot = 256;
+
 /// Copies `bytes` of a command buffer into the arena; its arena offset, or -1 when it is full.
 static s64 CopyToArena(const u32* source, u32 bytes) {
     if (arena_restart) {
         arena_used = 0;
         arena_restart = false;
     }
-    const u64 aligned = (u64(bytes) + 255) & ~u64(255);
+    const u64 aligned = ArenaHeaderSlot + ((u64(bytes) + 255) & ~u64(255));
     if (arena_used + aligned > BBGPU_ARENA_SIZE) {
         static bool warned;
         if (!warned) {
@@ -128,10 +136,32 @@ static s64 CopyToArena(const u32* source, u32 bytes) {
         return -1;
     }
     auto* arena = reinterpret_cast<u8*>(BbSplit::Shared()) + BBGPU_ARENA_OFFSET;
-    std::memcpy(arena + arena_used, source, bytes);
-    const s64 offset = s64(arena_used);
+    const ArenaCopyHeader header{ArenaCopyMagic, reinterpret_cast<u64>(source), bytes};
+    std::memcpy(arena + arena_used, &header, sizeof(header));
+    const s64 offset = s64(arena_used + ArenaHeaderSlot);
+    std::memcpy(arena + offset, source, bytes);
     arena_used += aligned;
     return offset;
+}
+
+/// The game's command buffer that the arena copy at `copy` was made from (host side).
+bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes) {
+    if (!BbSplit::Shared()) {
+        return false;
+    }
+    const auto arena = reinterpret_cast<uintptr_t>(BbSplit::Shared()) + BBGPU_ARENA_OFFSET;
+    if (copy < arena + ArenaHeaderSlot || copy >= arena + BBGPU_ARENA_SIZE ||
+        (copy - arena) % 256 != 0) {
+        return false;
+    }
+    ArenaCopyHeader header;
+    std::memcpy(&header, reinterpret_cast<const void*>(copy - ArenaHeaderSlot), sizeof(header));
+    if (header.magic != ArenaCopyMagic) {
+        return false;
+    }
+    *guest = header.guest;
+    *bytes = header.bytes;
+    return true;
 }
 
 // bbport: the game's side of the GPU process split (bbport_split.h). Validation and the

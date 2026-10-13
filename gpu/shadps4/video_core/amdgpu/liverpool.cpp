@@ -18,6 +18,8 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include <cstdio>
+#include <vector>
+#include <mach/mach_vm.h>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -111,6 +113,54 @@ void Liverpool::ProcessCommands() {
 }
 
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+namespace Libraries::GnmDriver {
+bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes);
+}
+
+// bbport: a split-mode command buffer is parsed from a copy made at submit. Compares the copy with
+// the game's buffer as it is now (read without faulting): equal around the bad packet means the
+// game submitted those bytes; a difference means the game wrote the buffer after the copy.
+static void CompareWithGuestBuffer(uintptr_t base, uintptr_t at) {
+    u64 guest = 0, bytes = 0;
+    if (!Libraries::GnmDriver::BbArenaSource(base, &guest, &bytes)) {
+        return;
+    }
+    std::vector<u32> now(bytes / 4);
+    mach_vm_size_t got = 0;
+    if (mach_vm_read_overwrite(mach_task_self(), guest, bytes,
+                               reinterpret_cast<mach_vm_address_t>(now.data()), &got) !=
+            KERN_SUCCESS ||
+        got != bytes) {
+        std::fprintf(stderr, "  copy of guest buffer %#llx (%llu bytes): guest unreadable\n",
+                     (unsigned long long)guest, (unsigned long long)bytes);
+        return;
+    }
+    const auto* copy = reinterpret_cast<const u32*>(base);
+    size_t differ = 0, first = ~size_t{0}, last = 0;
+    for (size_t i = 0; i < now.size(); ++i) {
+        if (copy[i] != now[i]) {
+            ++differ;
+            first = std::min(first, i);
+            last = i;
+        }
+    }
+    const size_t target = (at - base) / 4;
+    std::fprintf(stderr, "  copy of guest buffer %#llx (%llu bytes): %zu words differ now",
+                 (unsigned long long)guest, (unsigned long long)bytes, differ);
+    if (differ) {
+        std::fprintf(stderr, " (words %zu..%zu)", first, last);
+    }
+    std::fprintf(stderr, "\n  guest now around the bad packet:");
+    for (size_t i = target >= 8 ? target - 8 : 0; i < std::min(now.size(), target + 8); ++i) {
+        std::fprintf(stderr, "%s%08x%c", i == target ? " [" : " ", now[i],
+                     now[i] != copy[i] ? '*' : (i == target ? ']' : ' '));
+    }
+    std::fprintf(stderr, "\n  copy around the bad packet:      ");
+    for (size_t i = target >= 8 ? target - 8 : 0; i < std::min(now.size(), target + 8); ++i) {
+        std::fprintf(stderr, "%s%08x ", i == target ? " [" : " ", copy[i]);
+    }
+    std::fprintf(stderr, "\n");
+}
 
 // bbport: an invalid packet in a command buffer. Shows the packet as the guest mapping and the
 // backing store hold it, now and 50 ms later: a difference between the views points at memory
@@ -153,6 +203,7 @@ static void DumpBadPacket(const u32* packet, uintptr_t base, size_t remaining) {
         std::fprintf(stderr, "  packet at word %zu: header %08x (type %u, %u words)\n", p, h, h >> 30,
                      (h >> 30) == 2 ? 1u : ((h >> 16) & 0x3fff) + 2);
     }
+    CompareWithGuestBuffer(base, at);
 }
 
 void Liverpool::Process(std::stop_token stoken) {
