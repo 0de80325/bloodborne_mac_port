@@ -7,6 +7,9 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
+#include <atomic>
+#include <functional>
+
 #include <boost/container/small_vector.hpp>
 
 namespace Shader {
@@ -32,9 +35,18 @@ public:
              bool is_compute = false);
     virtual ~Pipeline();
 
+    /// Only for a ready pipeline (IsReady, or after WaitHandle).
     vk::Pipeline Handle() const noexcept {
         return *pipeline;
     }
+
+    /// bbport: false while the creation pool is still building the pipeline.
+    bool IsReady() const noexcept {
+        return building.load(std::memory_order_acquire) == 0;
+    }
+
+    /// bbport: the handle once the creation pool has built it; null when the driver rejected it.
+    vk::Pipeline WaitHandle() const;
 
     vk::PipelineLayout GetLayout() const noexcept {
         return *pipeline_layout;
@@ -63,6 +75,10 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
+    /// bbport: runs `build` (the vkCreate*Pipelines call, where MoltenVK and Metal compile) on
+    /// the pipeline creation pool, or right here when the pool is off.
+    void BuildAsync(std::function<void()> build);
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;
@@ -73,6 +89,18 @@ protected:
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
     bool is_compute;
+    mutable std::atomic<u32> building{0};
 };
+
+/// bbport: background pipeline creation. Shader translation stays on the GPU command thread;
+/// creating the Vulkan pipeline (MoltenVK converts SPIR-V to MSL and Metal compiles it) runs on
+/// a few low-priority threads, so new pipelines compile in parallel and off the render path.
+/// BB_PIPELINE_THREADS=n (default 4; 0 creates pipelines where they are needed, as before).
+namespace PipelineBuilder {
+bool Enabled();
+void Submit(std::function<void()> job);
+/// Waits until every submitted pipeline is built.
+void Drain();
+} // namespace PipelineBuilder
 
 } // namespace Vulkan

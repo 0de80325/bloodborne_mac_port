@@ -128,6 +128,7 @@ public:
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage,
                            Shader::Backend::Bindings& binding);
     size_t FreePermIndex(u64 pgm_hash, size_t from) const;
+    const GraphicsPipeline* Drawable(const GraphicsPipeline* pipeline);
 
     const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
                                                 const PreparedDraw* prepared = nullptr);

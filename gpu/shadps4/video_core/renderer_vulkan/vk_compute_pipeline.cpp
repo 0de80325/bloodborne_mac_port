@@ -21,16 +21,6 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     info = &info_;
     const auto debug_str = GetDebugString();
 
-    const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
-        .requiredSubgroupSize = 64,
-    };
-    const vk::PipelineShaderStageCreateInfo shader_ci = {
-        .pNext = instance.IsSubgroupSize64Supported() ? &subgroup_size_ci : nullptr,
-        .stage = vk::ShaderStageFlagBits::eCompute,
-        .module = module,
-        .pName = "main",
-    };
-
     u32 binding{};
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     for (const auto& buffer : info->buffers) {
@@ -102,18 +92,34 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     pipeline_layout = std::move(layout);
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
-    const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
-        .stage = shader_ci,
-        .layout = *pipeline_layout,
-    };
-    auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create compute pipeline: {}",
-               vk::to_string(pipeline_result));
-    pipeline = std::move(pipe);
-    SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+    // bbport: created on the pipeline creation pool when it is on (vk_pipeline_common.h).
+    const bool subgroup_64 = instance.IsSubgroupSize64Supported();
+    BuildAsync([this, module, pipeline_cache, subgroup_64, debug_str] {
+        const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size = {
+            .requiredSubgroupSize = 64,
+        };
+        const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+            .stage =
+                {
+                    .pNext = subgroup_64 ? &subgroup_size : nullptr,
+                    .stage = vk::ShaderStageFlagBits::eCompute,
+                    .module = module,
+                    .pName = "main",
+                },
+            .layout = *pipeline_layout,
+        };
+        const vk::Device device = this->instance.GetDevice();
+        auto [pipeline_result, pipe] =
+            device.createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+        ASSERT_MSG(pipeline_result == vk::Result::eSuccess,
+                   "Failed to create compute pipeline: {}", vk::to_string(pipeline_result));
+        pipeline = std::move(pipe);
+        SetObjectName(device, *pipeline, "Compute Pipeline {}", debug_str);
+    });
 }
 
-ComputePipeline::~ComputePipeline() = default;
+ComputePipeline::~ComputePipeline() {
+    WaitHandle(); // a build still on the creation pool uses this object
+}
 
 } // namespace Vulkan

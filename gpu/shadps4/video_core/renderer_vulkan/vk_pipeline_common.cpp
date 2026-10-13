@@ -1,11 +1,25 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <condition_variable>
+#include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <span>
+#include <string>
+#include <thread>
+#include <vector>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 
+#include "bbport_cpu.h"
+#include "bbport_toggles.h"
+#include "common/thread.h"
 #include "shader_recompiler/resource.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -20,7 +34,124 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
     : instance{instance_}, scheduler{scheduler_}, desc_heap{desc_heap_}, profile{profile_},
       is_compute{is_compute_} {}
 
-Pipeline::~Pipeline() = default;
+Pipeline::~Pipeline() {
+    // A pipeline still in the creation pool must finish before its state goes away.
+    if (!IsReady()) {
+        WaitHandle();
+    }
+}
+
+vk::Pipeline Pipeline::WaitHandle() const {
+    if (building.load(std::memory_order_acquire) != 0) {
+        const u64 start = bbport::CpuCycles();
+        while (building.load(std::memory_order_acquire) != 0) {
+            building.wait(1, std::memory_order_acquire);
+        }
+        BbStats::compile_wait_ns.fetch_add(bbport::CpuCycles() - start, std::memory_order_relaxed);
+    }
+    return *pipeline;
+}
+
+void Pipeline::BuildAsync(std::function<void()> build) {
+    if (!PipelineBuilder::Enabled()) {
+        build();
+        return;
+    }
+    building.store(1, std::memory_order_relaxed);
+    PipelineBuilder::Submit([this, build = std::move(build)] {
+        const u64 start = bbport::CpuCycles();
+        build();
+        BbStats::background_build_ns.fetch_add(bbport::CpuCycles() - start,
+                                               std::memory_order_relaxed);
+        BbStats::background_builds.fetch_add(1, std::memory_order_relaxed);
+        building.store(0, std::memory_order_release);
+        building.notify_all();
+    });
+}
+
+namespace PipelineBuilder {
+namespace {
+struct Pool {
+    std::mutex mutex;
+    std::condition_variable work_cv, idle_cv;
+    std::deque<std::function<void()>> jobs;
+    u32 running = 0;
+    std::vector<std::jthread> threads;
+
+    explicit Pool(u32 count) {
+        for (u32 i = 0; i < count; ++i) {
+            threads.emplace_back([this, i](std::stop_token stop) { Run(stop, i); });
+        }
+    }
+    ~Pool() {
+        for (auto& thread : threads) {
+            thread.request_stop();
+        }
+        work_cv.notify_all();
+    }
+
+    void Run(std::stop_token stop, u32 index) {
+        Common::SetCurrentThreadName(("bb:PipeBuild" + std::to_string(index)).c_str());
+#ifdef __APPLE__
+        // Below the render threads: mostly the efficiency cores.
+        pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+        std::unique_lock lk{mutex};
+        while (true) {
+            work_cv.wait(lk, [&] { return stop.stop_requested() || !jobs.empty(); });
+            if (stop.stop_requested() && jobs.empty()) {
+                return;
+            }
+            auto job = std::move(jobs.front());
+            jobs.pop_front();
+            ++running;
+            lk.unlock();
+            job();
+            lk.lock();
+            --running;
+            if (jobs.empty() && running == 0) {
+                idle_cv.notify_all();
+            }
+        }
+    }
+};
+
+u32 ThreadCount() {
+    static const u32 count = [] {
+        const char* env = std::getenv("BB_PIPELINE_THREADS");
+        return env ? u32(std::clamp(std::atoi(env), 0, 16)) : 4u;
+    }();
+    return count;
+}
+
+Pool& GetPool() {
+    static Pool pool{ThreadCount()};
+    return pool;
+}
+} // namespace
+
+bool Enabled() {
+    return ThreadCount() != 0;
+}
+
+void Submit(std::function<void()> job) {
+    auto& pool = GetPool();
+    {
+        std::scoped_lock lk{pool.mutex};
+        pool.jobs.push_back(std::move(job));
+    }
+    pool.work_cv.notify_one();
+}
+
+void Drain() {
+    if (!Enabled()) {
+        return;
+    }
+    auto& pool = GetPool();
+    std::unique_lock lk{pool.mutex};
+    pool.idle_cv.wait(lk, [&] { return pool.jobs.empty() && pool.running == 0; });
+}
+} // namespace PipelineBuilder
 
 
 void Pipeline::BindResources(DescriptorWrites& set_writes,

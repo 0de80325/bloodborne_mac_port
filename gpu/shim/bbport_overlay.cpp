@@ -892,6 +892,22 @@ void AdvancedTab(BbSettings::Values& s) {
     }
     EndCard();
 
+    BeginCard("Shader compilation");
+    Label("New shaders");
+    InfoTip("Shaders the game has not used on this Mac before compile in the background. "
+            "Wait: a draw waits for its shader (a short hitch, the image is always complete). "
+            "Skip: the draw is left out until its shader is ready (no hitch, an object can be "
+            "missing for a frame or two). Shaders seen before load at start either way.");
+    static const char* compile_modes[] = {"Wait", "Skip"};
+    static const char* compile_tips[] = {"Brief hitch, complete image",
+                                         "No hitch, objects may pop in"};
+    if (const int picked = Segmented("compile", compile_modes, 2, s.shader_skip ? 1 : 0, nullptr,
+                                     compile_tips);
+        picked >= 0) {
+        Store(s.shader_skip, picked == 1, true);
+    }
+    EndCard();
+
     bool pending = false;
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         pending |= IsStartupOption(e) && s.effects[e] != s.startup_effects[e];

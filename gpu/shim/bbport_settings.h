@@ -76,6 +76,10 @@ struct Values {
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
     std::atomic<int> live_resolution{0};
+    /// A draw whose pipeline is still compiling in the background: false waits for it (a
+    /// hitch, correct image), true skips the draw until it is ready (no hitch, an object may be
+    /// missing for a few frames). bbport.ini shader_compile=wait|skip; live.
+    std::atomic<bool> shader_skip{false};
     /// Why FSR 4 cannot run (assets, device features), or null. Set by the renderer.
     std::atomic<const char*> fsr4_problem{nullptr};
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};

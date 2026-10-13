@@ -10,7 +10,9 @@
 #include <string>
 #include <unordered_set>
 
+#include "bbport_settings.h"
 #include "bbport_threads.h"
+#include "bbport_toggles.h"
 
 #include "common/hash.h"
 #include "common/io_file.h"
@@ -355,7 +357,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     pipeline_cache = std::move(cache);
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    PipelineBuilder::Drain(); // builds still running use the Vulkan pipeline cache
+}
 
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.
 std::atomic<u64> g_bb_compile_ns;
@@ -410,7 +414,21 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         }
     }
     const auto it = graphics_pipelines.find(prepared.key);
-    return it != graphics_pipelines.end() && it->second->Handle() ? it->second.get() : nullptr;
+    return it != graphics_pipelines.end() ? Drawable(it->second.get()) : nullptr;
+}
+
+// bbport: the pipeline a draw may use: null when the driver rejected it, or while it is still
+// compiling on the creation pool and the player chose shader_compile=skip. Otherwise a pipeline
+// still compiling is returned and the recording thread waits for it (Rasterizer::Draw).
+const GraphicsPipeline* PipelineCache::Drawable(const GraphicsPipeline* pipeline) {
+    if (!pipeline->IsReady()) {
+        if (BbSettings::Get().shader_skip.load(std::memory_order_relaxed)) {
+            BbStats::compile_skipped_draws.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+        return pipeline;
+    }
+    return pipeline->Handle() ? pipeline : nullptr;
 }
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
@@ -450,7 +468,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         sel.fetch_shader.reset();
     }
-    return it->second->Handle() ? it->second.get() : nullptr; // null: rejected by the driver
+    return Drawable(it->second.get());
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {
@@ -905,9 +923,8 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
-    size_t perm_idx = FreePermIndex(params.hash, program->modules.size());
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
-
+    size_t perm_idx{};
+    u64 perm_hash{};
     vk::ShaderModule module{};
 
     // bbport: consecutive draws of a program almost always use the same permutation.
@@ -919,6 +936,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         program->last_used = std::distance(program->modules.begin(), it);
     }
     if (it == program->modules.end()) {
+        // Only a new permutation needs a free index (a cache lookup per candidate).
+        perm_idx = FreePermIndex(params.hash, program->modules.size());
+        perm_hash = HashCombine(params.hash, perm_idx);
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
 

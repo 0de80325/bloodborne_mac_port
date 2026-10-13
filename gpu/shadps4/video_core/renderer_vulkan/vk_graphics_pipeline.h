@@ -110,6 +110,16 @@ public:
                          u32 step_rate_1) const;
 
 private:
+    /// bbport: what pipeline creation needs, copied so it can run on the creation pool.
+    struct BuildInputs {
+        SerializationSupport sdata;
+        std::array<bool, MaxShaderStages> has_stage{};
+        std::array<vk::ShaderModule, MaxShaderStages> modules{};
+        bool clip_emulation{};
+        vk::PipelineCache pipeline_cache;
+        std::string debug_str;
+    };
+    void Build(const BuildInputs& in);
     void BuildDescSetLayout(bool preloading);
 
 private:

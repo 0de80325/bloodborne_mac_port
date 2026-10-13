@@ -153,4 +153,8 @@ inline std::atomic<std::uint64_t> protect_calls{0}, protect_pages{0}, protect_re
 inline std::atomic<std::uint64_t> rec_busy_ns{0}, rec_idle_ns{0}, flip_submit_ns{0},
     queue_submit_ns{0}, queue_submits{0}, frames_ahead_ns{0}, gpu_latency_ns{0}, gpu_done_frames{0},
     gpu_done_gap_ns{0}, drain_ns{0}, compile_wait_ns{0};
+/// Pipelines built by the background creation pool and its time (ns, all pool threads).
+inline std::atomic<std::uint64_t> background_builds{0}, background_build_ns{0};
+/// Draws skipped because their pipeline was still compiling (shader_compile=skip).
+inline std::atomic<std::uint64_t> compile_skipped_draws{0};
 } // namespace BbStats

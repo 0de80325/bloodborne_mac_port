@@ -1117,12 +1117,17 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
-    const vk::Pipeline handle = pipeline->Handle();
     const u32 num_indices = regs.num_indices;
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
+    // bbport: the pipeline may still be compiling on the creation pool; the recording thread
+    // waits for it as late as possible (null: rejected by the driver, the draw is dropped).
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        const vk::Pipeline handle = pipeline->WaitHandle();
+        if (!handle) {
+            return;
+        }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
         if (is_indexed) {
             cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
@@ -1245,12 +1250,15 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
                                  : sizeof(VkDrawIndirectCommand)));
-    const vk::Pipeline handle = pipeline->Handle();
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     const vk::Buffer counts = count_address != 0 ? count_buffer->Handle() : vk::Buffer{};
     const u64 counts_offset = count_address != 0 ? count_offset : 0;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        const vk::Pipeline handle = pipeline->WaitHandle(); // see Draw
+        if (!handle) {
+            return;
+        }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
         if (is_indexed) {
             if (counts) {
@@ -1330,13 +1338,14 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     mark();
     pipeline->BindResources(set_writes, push_data);
 
-    const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     }
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        // Dispatches always wait for their pipeline: skipping one could leave its results
+        // missing for later frames.
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->WaitHandle());
         cmdbuf.dispatch(dim_x, dim_y, dim_z);
     });
     DebugState.IncDispatch();
@@ -1383,11 +1392,10 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     scheduler.EndRendering();
     pipeline->BindResources(set_writes, push_data);
 
-    const vk::Pipeline handle = pipeline->Handle();
     const vk::Buffer args = buffer->Handle();
     const u64 args_offset = base;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
-        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->WaitHandle());
         cmdbuf.dispatchIndirect(args, args_offset);
     });
     DebugState.IncDispatch();

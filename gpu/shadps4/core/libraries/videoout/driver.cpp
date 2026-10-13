@@ -534,6 +534,16 @@ void VideoOutDriver::Flip(const Request& req) {
                             rec_busy, flip_submit, ahead, rec_idle, queue_submit, submits, drain,
                             gpu_latency, gpu_gap);
             }
+            if (const u64 built = BbStats::background_builds.exchange(0)) {
+                std::printf("Pipelines: %llu built in the background (%.1f ms on the creation "
+                            "threads); render path waited %.1f ms; %llu draws skipped while "
+                            "compiling\n",
+                            static_cast<unsigned long long>(built),
+                            BbStats::background_build_ns.exchange(0) / 1e6,
+                            BbStats::compile_wait_ns.exchange(0) / 1e6,
+                            static_cast<unsigned long long>(
+                                BbStats::compile_skipped_draws.exchange(0)));
+            }
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;
