@@ -89,6 +89,9 @@ def main():
     label_of, matched, skipped = {}, 0, 0
     for n, segs in segments.items():
         logged = passes.get(n, [])
+        if len(segs) == len(logged) + 1:
+            # The frame's last pass is the host's post-processing pass (Presenter), not logged.
+            logged = logged + ['(host post-process pass)']
         if len(segs) != len(logged):
             skipped += 1
             continue

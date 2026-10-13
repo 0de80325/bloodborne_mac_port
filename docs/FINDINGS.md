@@ -313,6 +313,22 @@ include full-screen post passes; the game stalled at the title). So pass merging
 0.5 ms (copy splits) + ≤ 1 ms (tessellation) + ≤ ~1 ms (rect lists) at 1440p, short of the ~3.7 ms
 1440p needs for 60 on its own.
 
+**1440p is held by GPU idle time, not GPU work (2026-10-13, Metal System Trace, 1440p native live,
+uncapped ~48–49 FPS):** the GPU is busy **15.5 ms per 20.7 ms frame** (vertex 6.0, fragment 9.1,
+compute 1.9 — already under the 16.7 ms that 60 FPS needs); it idles ~3.5 ms per frame in gaps
+between encoders inside the frame's command buffer and ~1 ms between command buffers. At 1080p
+the vertex stage is the largest (5.9 ms vs fragment 4.7; the main G-buffer pass 1.6 ms vertex,
+0.4 ms fragment). Dropping precise math from vertex shaders too (`BB_SPIRV_PRECISE=none`) with
+Metal fast math off everywhere (`MVK_CONFIG_FAST_MATH_ENABLED=0`, so positions stay consistent
+between passes): geometry correct, GPU 15.5 → 14.9 ms — only ~0.4 ms of vertex time; fast math off
+alone costs ~0.2 ms of fragment time. Uncapped FPS cannot show gains under ~2 ms: frame times snap
+to 480 Hz ticks (49 FPS = 10 ticks). Measure GPU time (`gpubusy`) instead.
+
+**Zero-copy feasibility:** Metal on the M4 Max wraps 8 GiB of existing host memory as one buffer
+without copying (`newBufferWithBytesNoCopy`; `maxBufferLength` 28.1 GiB); the guest's GPU-visible
+pool is 6.4 GiB. Importing it would remove the per-frame upload copies (81 blit encoders, ~26 pass
+splits), the host-copy waits and most write-tracking faults.
+
 **Background pipeline creation (2026-10-13).** With an empty shader cache (macOS's own Metal
 cache warm), a new shader cost ~1.2 ms: ~70% creating the pipeline (MoltenVK SPIR-V→MSL and the
 Metal compiler), ~30% our translation. `FreePermIndex` (a `stat()` per probe) ran on every program

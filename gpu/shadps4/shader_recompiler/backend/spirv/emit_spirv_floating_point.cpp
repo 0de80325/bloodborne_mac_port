@@ -14,16 +14,20 @@ namespace Shader::Backend::SPIRV {
 // multiply and FMA into a call to an [[clang::optnone]] helper, which the Metal compiler cannot
 // optimize: on every fragment and compute shader that cost the city scene 19.6 -> 12.1 ms of
 // GPU time per frame. BB_SPIRV_PRECISE=all restores it everywhere (with a fresh shader cache).
-static bool PreciseEverywhere() {
-    static const bool all = [] {
+// BB_SPIRV_PRECISE=none: nowhere (experiments; with a fresh shader cache).
+static int PreciseMode() {
+    static const int mode = [] {
         const char* env = std::getenv("BB_SPIRV_PRECISE");
-        return env && !std::strcmp(env, "all");
+        return !env ? 0 : !std::strcmp(env, "all") ? 1 : !std::strcmp(env, "none") ? 2 : 0;
     }();
-    return all;
+    return mode;
 }
 
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
-    if (PreciseEverywhere() ||
+    if (PreciseMode() == 2) {
+        return op;
+    }
+    if (PreciseMode() == 1 ||
         (ctx.sw_stage != SwStage::Fragment && ctx.sw_stage != SwStage::Compute)) {
         ctx.Decorate(op, spv::Decoration::NoContraction);
     }
