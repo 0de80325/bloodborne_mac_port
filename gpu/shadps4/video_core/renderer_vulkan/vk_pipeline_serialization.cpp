@@ -161,7 +161,8 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
 
     Serialization::Archive meta_ar{std::move(meta_blob)};
 
-    if (!LoadPipelineStage(meta_ar, 0)) {
+    Shader::Backend::Bindings binding{};
+    if (!LoadPipelineStage(meta_ar, 0, binding)) {
         return false;
     }
 
@@ -220,6 +221,9 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
 
+    // Stages in the order the runtime binds them (RefreshGraphicsStages: fragment first), so
+    // each one's first binding can be checked against the stages before it.
+    Shader::Backend::Bindings binding{};
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
         const auto& hash = sel.graphics_key.stage_hashes[stage_idx];
         if (!hash) {
@@ -235,7 +239,7 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
         Serialization::Archive meta_ar{std::move(meta_blob)};
 
-        if (!LoadPipelineStage(meta_ar, stage_idx)) {
+        if (!LoadPipelineStage(meta_ar, stage_idx, binding)) {
             return false;
         }
     }
@@ -254,7 +258,8 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     return true;
 }
 
-bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
+bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage,
+                                      Shader::Backend::Bindings& binding) {
     auto program = std::make_unique<Program>();
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
@@ -262,6 +267,20 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx)) {
         return false;
     }
+    // bbport: a permutation's SPIR-V numbers its resources from the bindings of the stages before
+    // it. One stored for another pipeline (a later session reused its index) gives this pipeline
+    // a layout its shader does not match: Metal rejects it ("cannot reserve 'buffer' resource
+    // location") and its draws are skipped. Such a pipeline is left to the runtime.
+    const bool has_bindings = !program->info.buffers.empty() || !program->info.images.empty() ||
+                              !program->info.samplers.empty();
+    if (has_bindings && spec.start != binding) {
+        LOG_WARNING(Render_Vulkan,
+                    "Cached permutation {} of {:#x} starts at binding {} (pipeline needs {}), "
+                    "skipping preload",
+                    perm_idx, program->info.pgm_hash, spec.start.unified, binding.unified);
+        return false;
+    }
+    program->info.AddBindings(binding);
 
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,

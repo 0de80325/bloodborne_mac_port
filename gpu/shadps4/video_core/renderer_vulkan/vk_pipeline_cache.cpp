@@ -875,21 +875,22 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     if (it_pgm == program_cache.end()) {
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto start = binding;
+        const size_t perm_idx = FreePermIndex(params.hash, 0);
         const auto module =
-            CompileModule(new_program->info, runtime_info, params.code, 0, binding);
+            CompileModule(new_program->info, runtime_info, params.code, perm_idx, binding);
         auto spec = Shader::StageSpecialization(new_program->info, runtime_info, profile, start);
-        const auto perm_hash = HashCombine(params.hash, 0);
+        const auto perm_hash = HashCombine(params.hash, perm_idx);
 
-        RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        new_program->AddPermut(module, std::move(spec));
+        RegisterShaderMeta(new_program->info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
+        new_program->InsertPermut(module, std::move(spec), perm_idx);
         new_program->info_template = std::make_unique<Shader::Info>(new_program->info);
         Program* program = new_program.get();
         {
             std::unique_lock lk{programs_mutex};
             program_cache.emplace(params.hash, std::move(new_program));
         }
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
-                               perm_hash);
+        return std::make_tuple(&program->info, module,
+                               program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
     }
 
     auto& program = it_pgm.value();
@@ -904,7 +905,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 
-    size_t perm_idx = program->modules.size();
+    size_t perm_idx = FreePermIndex(params.hash, program->modules.size());
     u64 perm_hash = HashCombine(params.hash, perm_idx);
 
     vk::ShaderModule module{};
@@ -923,7 +924,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         std::unique_lock lk{programs_mutex};
-        program->AddPermut(module, std::move(spec));
+        program->InsertPermut(module, std::move(spec), perm_idx);
     } else {
         info.AddBindings(binding);
         module = it->module;
@@ -932,6 +933,21 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+}
+
+// bbport: the first permutation index at or after `from` that the cache has not stored. Indices
+// count from what this session loaded; a stored permutation it did not preload (its pipeline was
+// skipped) keeps its index, else a new one overwrites it and the pipelines that referenced it
+// load a shader numbered for other bindings.
+size_t PipelineCache::FreePermIndex(u64 pgm_hash, size_t from) const {
+    if (!EmulatorSettings.IsPipelineCacheEnabled()) {
+        return from;
+    }
+    auto& db = Storage::DataBase::Instance();
+    while (db.Exists(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", pgm_hash, from))) {
+        ++from;
+    }
+    return from;
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
