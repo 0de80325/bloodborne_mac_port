@@ -91,10 +91,9 @@ void CommandPool::Allocate(std::size_t begin, std::size_t end) {
     const auto result =
         device.allocateCommandBuffers(&buffer_alloc_info, cmd_buffers.data() + begin);
     ASSERT(result == vk::Result::eSuccess);
-
-    for (std::size_t i = begin; i < end; ++i) {
-        SetObjectName(device, cmd_buffers[i], "CommandPool: Command Buffer {}", i);
-    }
+    // bbport: command buffers stay unnamed: MoltenVK labels every Metal encoder after its
+    // command buffer's name, formatting a string each time (~4% of the recording thread).
+    // BB_PASS_LOG names them for profiling (Scheduler::AllocateWorkerCommandBuffers).
 }
 
 vk::CommandBuffer CommandPool::Commit() {
