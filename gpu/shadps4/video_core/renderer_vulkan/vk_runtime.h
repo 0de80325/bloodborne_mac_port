@@ -38,8 +38,11 @@ public:
     void NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64 size);
     /// Records the copies ahead of the submission and returns true, or false (nothing done)
     /// when that is not safe or not useful; the caller then uses CopyBuffer.
+    /// `shader_copy`: the game's copy shader, between guest ranges. A source in a registered
+    /// buffer must be unused in this submission too, and the copy runs after the copies hoisted
+    /// before it (they may have uploaded its ranges). The caller marks both ranges used.
     bool HoistCopy(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
-                   std::span<const vk::BufferCopy> copies);
+                   std::span<const vk::BufferCopy> copies, bool shader_copy = false);
 
     Scheduler& GetScheduler() {
         return scheduler;
@@ -56,8 +59,10 @@ public:
     void TickFrame();
     SceneTargets* scene_targets = nullptr;
 
+    /// bbport: `where` names the caller in BB_PASS_STATS.
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
-                    std::span<const vk::BufferCopy> copies);
+                    std::span<const vk::BufferCopy> copies,
+                    std::source_location where = std::source_location::current());
 
     void FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value);
 

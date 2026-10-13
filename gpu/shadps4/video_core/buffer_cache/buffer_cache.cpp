@@ -307,7 +307,8 @@ void PrintBufferStats() {
 } // namespace
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
-                                                        bool is_written, bool is_texel_buffer) {
+                                                        bool is_written, bool is_texel_buffer,
+                                                        bool note_use) {
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -358,7 +359,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         gpu_modified_ranges.Add(device_addr, size);
     }
     // bbport: index and vertex reads are not tracked as accesses; every use is (upload hoisting).
-    runtime.NoteSubmissionUse(arena, arena->Offset(device_addr), size);
+    if (note_use) {
+        runtime.NoteSubmissionUse(arena, arena->Offset(device_addr), size);
+    }
     return {arena, arena->Offset(device_addr)};
 }
 

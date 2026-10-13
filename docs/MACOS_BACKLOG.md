@@ -148,6 +148,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   alignment on M4 Max, unified 48 GiB heap) so the GPU reads/writes guest memory in place —
   removes uploads, read-backs and most write tracking. Mind CPU/GPU coherence and the Rosetta
   aliased-code caveat (Stability).
+  *Measured 2026-10-13 (FINDINGS "Copy-shader pass splits"):* the pass splits come from the
+  game's copy shader, not uploads, so zero-copy mostly saves CPU work (write faults, staging
+  copies), not GPU time. It also needs EOP fences signalled at GPU completion (they are
+  signalled at record time today), or the GPU reads buffers the game is already reusing.
+- **Versioned copy-shader table.** ~24 copies per frame rewrite one table between draws inside a
+  pass, ending it. *Refinement:* give each draw group its own version of the table (copies built
+  ahead of the submission) so the pass stays open; bound ~1 ms GPU at 1440p.
 
 - **MetalFX with asynchronous submits.** *Now:* MetalFX encodes on MoltenVK's queue right after
   a synchronous `vkQueueSubmit` (commit order). *Refinement:* order it with an MTLSharedEvent

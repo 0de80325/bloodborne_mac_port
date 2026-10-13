@@ -358,6 +358,31 @@ was recording into; MoltenVK allocates command objects per pool, so the host die
 **Rosetta gotcha:** attaching lldb to a translated process and killing it wedged Rosetta for
 hours (new x86 processes hung in state U); it recovered on its own.
 
+### Copy-shader pass splits and the zero-copy premise (2026-10-13)
+
+Checked before starting zero-copy: which per-frame copies end render passes (`BB_PASS_STATS=1`,
+`Runtime::CopyBuffer` now names its caller). At 1080p **all ~26 buffer copies per frame that end
+a pass come from the game's own copy shader** (`ExecuteCopyShaderHLE`), plus ~15 from its
+multi-range form (`MultiCopy`). Buffer-cache uploads already run ahead of the pass (upload
+hoisting, ~17 per frame), so zero-copy would not remove these splits.
+
+- Copy-shader copies are now hoisted like uploads when neither range was used earlier in the
+  submission (`Runtime::HoistCopy(..., shader_copy)`, toggle bit 60). Only ~3 per frame
+  qualify: the ~24 that break passes rewrite entries of one ~37 KB table (`0x70d1ce3b40`)
+  between the draws that read it, a true dependency. On a tile-based GPU a write between draws
+  cannot stay inside one pass (vertex work of the whole pass runs before its pixels), so
+  keeping them in the pass would need a versioned copy of the table per draw group.
+- Bound (`BB_HOIST_UNSAFE=1`, wrong image), 1440p native live, Metal trace: GPU busy
+  15.3 → 14.3 ms/frame, FPS 48.7 → 49.0. The splits cost ~1 ms of GPU time and are not
+  what holds 1440p.
+- 1440p pacing: frames finish every ~20.5 ms with 15.3 ms of GPU work. The recording thread
+  spends ~8 ms per frame in the frames-ahead wait and ~5.4 ms in `vkQueueSubmit` (MoltenVK
+  encoding, 3 submits per frame); `BB_FRAMES_AHEAD=2` does not help (39–47 FPS). Frame times
+  snap to 2.08 ms ticks (480 Hz), so 53 FPS needs ≤ 18.75 ms.
+- Zero-copy risk found on the way: EOP/fence writes run when the draws are *recorded*, not when
+  the GPU has run them. Copies snapshot the data; reading guest memory in place would race with
+  the game reusing its buffers unless fences are signalled at GPU completion.
+
 ## Part 3 — Open issues
 
 | Issue | Status |

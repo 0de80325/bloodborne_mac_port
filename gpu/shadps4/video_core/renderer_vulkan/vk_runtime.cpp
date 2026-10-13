@@ -119,32 +119,43 @@ void Runtime::NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64
 }
 
 bool Runtime::HoistCopy(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
-                        std::span<const vk::BufferCopy> copies) {
-    if (!scheduler.IsRendering() || BbToggle::Disabled(BbToggle::UploadHoisting)) {
+                        std::span<const vk::BufferCopy> copies, bool shader_copy) {
+    if (!scheduler.IsRendering() || BbToggle::Disabled(BbToggle::UploadHoisting) ||
+        (shader_copy && BbToggle::Disabled(BbToggle::CopyShaderHoisting))) {
         return false; // outside a pass an inline copy costs no pass break
     }
-    const auto it = hoist_targets.find(dst);
-    if (it == hoist_targets.end()) {
-        return false;
-    }
     const u16 tick = static_cast<u16>(scheduler.CurrentTick());
-    for (const auto& copy : copies) {
-        if (copy.size == 0) {
-            continue;
-        }
-        const u64 last = (copy.dstOffset + copy.size - 1) >> HoistPageBits;
-        if (last >= it->second.pages) {
+    const auto unused = [&](const VideoCore::Buffer* buffer, bool source) {
+        const auto it = hoist_targets.find(buffer);
+        if (it == hoist_targets.end()) {
             return false;
         }
-        for (u64 page = copy.dstOffset >> HoistPageBits; page <= last; ++page) {
-            if (std::atomic_ref<u16>(it->second.tick[page]).load(std::memory_order_relaxed) ==
-                tick) {
-                return false; // used earlier in this submission: the copy must stay in order
+        for (const auto& copy : copies) {
+            if (copy.size == 0) {
+                continue;
+            }
+            const u64 offset = source ? copy.srcOffset : copy.dstOffset;
+            const u64 last = (offset + copy.size - 1) >> HoistPageBits;
+            if (last >= it->second.pages) {
+                return false;
+            }
+            for (u64 page = offset >> HoistPageBits; page <= last; ++page) {
+                if (std::atomic_ref<u16>(it->second.tick[page]).load(std::memory_order_relaxed) ==
+                    tick) {
+                    return false; // used earlier in this submission: the copy must stay in order
+                }
             }
         }
+        return true;
+    };
+    // A source outside the registered buffers is CPU-written staging (the stream buffer).
+    if (!unused(dst, false) || (shader_copy && hoist_targets.contains(src) && !unused(src, true))) {
+        return false;
     }
-    scheduler.RecordHoistedCopy(src->Handle(), dst->Handle(), copies);
-    BbStats::hoisted_copies.fetch_add(1, std::memory_order_relaxed);
+    scheduler.RecordHoistedCopy(src->Handle(), dst->Handle(), copies, shader_copy);
+    if (!shader_copy) {
+        BbStats::hoisted_copies.fetch_add(1, std::memory_order_relaxed);
+    }
     return true;
 }
 
@@ -153,8 +164,8 @@ void Runtime::TickFrame() {
 }
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
-                         std::span<const vk::BufferCopy> copies) {
-    scheduler.EndRendering();
+                         std::span<const vk::BufferCopy> copies, std::source_location where) {
+    scheduler.EndRendering(where);
 
     // bbport: many regions (HLE copy shaders) are tracked as one bounding range per buffer:
     // conservative for barriers, and two tree lookups instead of two per region.

@@ -72,6 +72,9 @@ enum : std::uint64_t {
     /// it used their destination yet (Runtime::HoistCopy), instead of ending the pass; bit set:
     /// every upload ends the pass.
     UploadHoisting = 1ull << 59,
+    /// The game's copy shader (ExecuteCopyShaderHLE) is hoisted the same way when neither its
+    /// source nor its destination was used in the submission; bit set: it ends the pass.
+    CopyShaderHoisting = 1ull << 60,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
@@ -91,6 +94,8 @@ inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command 
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0}, flips{0};
 /// bbport: uploads recorded ahead of their submission (Runtime::HoistCopy).
 inline std::atomic<std::uint64_t> hoisted_copies{0};
+/// bbport: copy-shader copies recorded ahead of their submission, and those that could not be.
+inline std::atomic<std::uint64_t> hoisted_shader_copies{0}, inline_shader_copies{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

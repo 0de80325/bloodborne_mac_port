@@ -546,8 +546,20 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::RecordHoistedCopy(vk::Buffer src, vk::Buffer dst,
-                                  std::span<const vk::BufferCopy> copies) {
+                                  std::span<const vk::BufferCopy> copies, bool ordered) {
     std::scoped_lock lk{upload_mutex};
+    if (upload_open && ordered) {
+        const vk::MemoryBarrier2 after_copies = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+        };
+        upload_cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .memoryBarrierCount = 1,
+            .pMemoryBarriers = &after_copies,
+        });
+    }
     if (!upload_open) {
         upload_cmdbuf = upload_pool.Commit();
         Check(upload_cmdbuf.begin(vk::CommandBufferBeginInfo{

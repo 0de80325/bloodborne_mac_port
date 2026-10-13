@@ -704,7 +704,9 @@ public:
     /// before all of its commands (Runtime::HoistCopy decides when that is safe). Copies there do
     /// not end the current render pass: on a tile-based GPU every reopened pass reloads its
     /// attachments.
-    void RecordHoistedCopy(vk::Buffer src, vk::Buffer dst, std::span<const vk::BufferCopy> copies);
+    /// `ordered`: the copy may read or write memory that copies hoisted before it wrote.
+    void RecordHoistedCopy(vk::Buffer src, vk::Buffer dst, std::span<const vk::BufferCopy> copies,
+                           bool ordered = false);
 
     /// Ends current rendering scope. bbport: the caller is counted with BB_PASS_STATS=1.
     void EndRendering(std::source_location where = std::source_location::current(),

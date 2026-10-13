@@ -210,10 +210,13 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         }
 
         // Obtain buffers for the total source and destination ranges.
+        // bbport: the ranges are marked used in the submission after the copy (hoisting).
         const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
-            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false);
+            src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false,
+            false, false);
         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
-            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true);
+            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true,
+            false, false);
 
         // Apply found buffer base.
         const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);
@@ -225,9 +228,25 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         // Execute buffer copies.
         LOG_TRACE(Render_Vulkan, "HLE buffer copy: src_size = {}, dst_size = {}",
                   src_offset_max - src_offset_min, dst_offset_max - dst_offset_min);
-        if (!MultiCopy(rasterizer, src_buf, dst_buf, vk_copies)) {
+        // bbport: a copy inside a render pass ends it (~24 per frame at 1080p, most reopening
+        // the same attachments). Unless its ranges were used earlier in the submission, it runs
+        // ahead of the submission instead. In Bloodborne most of them rewrite entries of one
+        // table between the draws that read it, so they stay in order (docs/FINDINGS.md).
+        // BB_HOIST_UNSAFE=1 hoists them anyway: wrong image, a measurement bound only.
+        static const bool unsafe_hoist = std::getenv("BB_HOIST_UNSAFE") != nullptr;
+        if (MultiCopy(rasterizer, src_buf, dst_buf, vk_copies)) {
+        } else if (unsafe_hoist && runtime.GetScheduler().IsRendering()) {
+            runtime.GetScheduler().RecordHoistedCopy(src_buf->Handle(), dst_buf->Handle(),
+                                                     vk_copies, true);
+            BbStats::hoisted_shader_copies.fetch_add(1, std::memory_order_relaxed);
+        } else if (runtime.HoistCopy(src_buf, dst_buf, vk_copies, true)) {
+            BbStats::hoisted_shader_copies.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            BbStats::inline_shader_copies.fetch_add(1, std::memory_order_relaxed);
             runtime.CopyBuffer(src_buf, dst_buf, vk_copies);
         }
+        runtime.NoteSubmissionUse(src_buf, src_buf_offset, src_offset_max - src_offset_min);
+        runtime.NoteSubmissionUse(dst_buf, dst_buf_offset, dst_offset_max - dst_offset_min);
         batch_start = batch_end;
     }
 
