@@ -407,6 +407,35 @@ Metal System Trace, 1440p native live, ~49 FPS; GPU busy 15.3 ms of a ~20.5 ms f
 - Tools (scratch, not in repo): commit-vs-GPU join, stall position per command buffer, stall
   labels via the `pass_trace.py` join.
 
+### Shader compile hitches during play: `balanced` mode (2026-10-13 evening, on mains)
+
+Ahead-of-time compiling of the game's shaders is not possible: the GCN→SPIR-V translation and the
+pipeline key depend on draw-time state (vertex formats from the fetch shader, buffer/image
+descriptors, render-target formats and blend), so only the persistent pipeline cache (already
+preloaded in the background at start) can hold "precompiled" work. What remains is the frame
+that first meets a new pipeline. Measured with an empty pipeline cache (`BB_GPU_USER_DIR` in a
+scratch folder) and a scripted walk after loading the save (`BB_PAD_FILE` `ly=0`/`rx=`):
+
+- With macOS's Metal compiler cache warm (shaders this Mac compiled before), a new pipeline costs
+  ~4 ms on the creation threads; walking met ~20 of them and frame pacing stayed within
+  p99 17–22 ms in both modes. One run hit a cold Metal cache: **~110–150 ms per pipeline**, and
+  walking froze frames for 70–270 ms (the player's "shader caching really hurts"). Renaming the
+  host executable does not reliably give a cold Metal cache.
+- Simulated cold compiles (`BB_COMPILE_DELAY_MS=100`, test knob), same walk:
+
+| `shader_compile` | Frames over 40 ms while walking | Worst | Draws skipped |
+|---|---|---|---|
+| `wait` | 15 (120–190 ms each) | 190 ms | 0 |
+| `balanced` (6 ms budget per frame) | 1 | 41 ms | ~700 over ~20 s, a few frames per new pipeline |
+
+`balanced` (now the default) waits for pipelines still compiling out of a budget refilled at
+`BB_COMPILE_BUDGET_MS` (default 6) per 60 Hz frame, never more than one frame's worth, and skips
+the draw once it is spent. Images correct after the walk. Compute pipelines always wait.
+`BB_MENU_OPEN=1..3` opens the settings menu on that tab at start (menu screenshots).
+
+The compile stats used the arm64 cycle counter as nanoseconds: right on the M4 (1 GHz), 41×
+too low on M1–M3 (24 MHz); they use `steady_clock` now.
+
 ## Part 3 — Open issues
 
 | Issue | Status |

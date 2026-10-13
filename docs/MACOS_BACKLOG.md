@@ -30,6 +30,18 @@ Each item: what was done for now, what the refinement is, and where it lives.
   loading into the level (`liverpool.cpp:820`, base reg 530), despite the command-buffer copy
   arena. Find which buffer is still read from guest memory after the submit (CCB? indirect
   buffers / `IndirectBuffer` packets pointing into game memory are not copied).
+  *2026-10-13 evening, 2 more (of ~10 runs, right after "Continue" on the title):* the copied DCB
+  equals the game's buffer at the fault (0 words differ), so the game submitted those bytes; not
+  a late rewrite. Both times stray words sit in a compute-shader setup sequence (`SET_SH_REG`
+  0x212 / 0x216–0x217 nearby); in one, `70d1b005 00000000` is a COMPUTE_PGM_LO/HI value
+  (program at 0x70d1b00500) with its packet header missing. Suspect a packet writer that emits a
+  different size than the game reserves (our HLE `sceGnmSetCsShader*`/dispatch functions, or a
+  patch). The diagnostic's guest-buffer comparison crashed the host before (a declaration inside
+  `namespace AmdGpu` resolved to a null call through `-undefined dynamic_lookup`): fixed.
+- **Gameplay judder with no compiles (2026-10-13).** The player sees occasional judder at a
+  steady 60/61 FPS. Automated runs standing in the city show a worst frame of 20–25 ms in every
+  5 s window (median 16.67, p99 17–22 ms) with zero shader compiles; the title screen has none.
+  Find what those frames wait on (present timing, a periodic CPU job, host-copy waits).
 - **Fixed 2026-10-13: pipelines Metal rejected after a cached session** ("cannot reserve
   'buffer' resource location"): shader permutation indices reused across sessions. *Remaining:*
   one pixel shader (`fs_fbe7c4b6`) has two cached permutations that compare equal ("conflicts
@@ -104,7 +116,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
   hoist the remaining copies; (2) put consecutive dispatches in one compute encoder; (3) the 47
   tessellated draws per frame each split a pass (MoltenVK's emulation): batch them or emulate
   tessellation ourselves; (4) attachment-less vertex-only passes (~20/frame) folded together.
-- **Shader compilation (done 2026-10-13: background pipeline creation, `shader_compile=wait|skip`).**
+- **Shader compilation (done 2026-10-13: background pipeline creation, `shader_compile=wait|skip`;
+  `balanced`, the default since 2026-10-13 evening, waits up to `BB_COMPILE_BUDGET_MS` (6) per
+  frame and then skips).** A true ahead-of-time precompile is not possible: a pipeline's
+  translation depends on draw-time state (fetch shader, buffer/image descriptors, render-target
+  formats), so the game's `shader/*.shaderbnd` archives alone cannot produce it.
   Pipeline creation (~70% of a new shader's cost) runs on 4 utility-QoS threads; the preload no
   longer blocks start. *Remaining:* our own GCN→SPIR-V translation (~30%) still runs on the GPU
   command thread; the draw-preparation workers could start compiles for pipelines they find

@@ -897,14 +897,22 @@ void AdvancedTab(BbSettings::Values& s) {
     InfoTip("Shaders the game has not used on this Mac before compile in the background. "
             "Wait: a draw waits for its shader (a short hitch, the image is always complete). "
             "Skip: the draw is left out until its shader is ready (no hitch, an object can be "
-            "missing for a frame or two). Shaders seen before load at start either way.");
-    static const char* compile_modes[] = {"Wait", "Skip"};
+            "missing for a frame or two). Balanced: waits up to a few milliseconds per frame, "
+            "then skips (short hitches only). Shaders seen before load at start either way.");
+    static const char* compile_modes[] = {"Wait", "Balanced", "Skip"};
     static const char* compile_tips[] = {"Brief hitch, complete image",
+                                         "Waits a few ms per frame, then skips",
                                          "No hitch, objects may pop in"};
-    if (const int picked = Segmented("compile", compile_modes, 2, s.shader_skip ? 1 : 0, nullptr,
-                                     compile_tips);
+    // Menu order differs from the stored values (Wait, Skip, Balanced).
+    static constexpr int menu_to_mode[] = {BbSettings::ShaderWait, BbSettings::ShaderBalanced,
+                                           BbSettings::ShaderSkip};
+    int current = 0;
+    for (int m = 0; m < 3; ++m) {
+        current = menu_to_mode[m] == s.shader_compile ? m : current;
+    }
+    if (const int picked = Segmented("compile", compile_modes, 3, current, nullptr, compile_tips);
         picked >= 0) {
-        Store(s.shader_skip, picked == 1, true);
+        Store(s.shader_compile, menu_to_mode[picked], true);
     }
     EndCard();
 
@@ -1318,6 +1326,11 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     }
     initialized = true;
     std::printf("Overlay: menu ready (" BBPORT_MENU_KEYS " or L3+R3)\n");
+    // BB_MENU_OPEN=1..3: start with the menu open on that tab (automated menu screenshots).
+    if (const char* open = std::getenv("BB_MENU_OPEN"); open && open[0] >= '1' && open[0] <= '3') {
+        current_tab = open[0] - '1';
+        SetOpen(true);
+    }
 }
 
 void UpdateTextInput(SDL_Window* window) {

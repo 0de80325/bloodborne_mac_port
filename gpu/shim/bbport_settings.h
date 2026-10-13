@@ -52,6 +52,9 @@ inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
 inline constexpr int OutputCount = 4;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
+/// Values::shader_compile.
+enum ShaderCompile { ShaderWait, ShaderSkip, ShaderBalanced, ShaderCompileCount };
+
 struct Values {
     std::atomic<int> upscaler{UpscalerOff};
     std::atomic<int> preset{NativeAA};
@@ -76,10 +79,11 @@ struct Values {
     /// Live resolution and preset changes (run.sh): 0 off by default (startup patch, fastest
     /// on the Steam Deck and older GPUs), -1 auto (strong discrete GPUs), 1 on. On restart.
     std::atomic<int> live_resolution{0};
-    /// A draw whose pipeline is still compiling in the background: false waits for it (a
-    /// hitch, correct image), true skips the draw until it is ready (no hitch, an object may be
-    /// missing for a few frames). bbport.ini shader_compile=wait|skip; live.
-    std::atomic<bool> shader_skip{false};
+    /// A draw whose pipeline is still compiling in the background: Wait waits for it (a hitch,
+    /// correct image), Skip leaves the draw out until it is ready (no hitch, an object may be
+    /// missing for a few frames), Balanced waits within a small time budget and skips past it.
+    /// bbport.ini shader_compile=wait|skip|balanced; live.
+    std::atomic<int> shader_compile{ShaderBalanced};
     /// Why FSR 4 cannot run (assets, device features), or null. Set by the renderer.
     std::atomic<const char*> fsr4_problem{nullptr};
     std::atomic<bool> fsr4_supported{false}, fsr411_supported{false};

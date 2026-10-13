@@ -61,7 +61,9 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "live_resolution") {
         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
     } else if (key == "shader_compile") {
-        v.shader_skip = value == "skip";
+        v.shader_compile = value == "skip"       ? BbSettings::ShaderSkip
+                           : value == "balanced" ? BbSettings::ShaderBalanced
+                                                 : BbSettings::ShaderWait;
     } else if (key == "output_res") {
         for (int r = 0; r < OutputCount; ++r) {
             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
@@ -201,7 +203,9 @@ void Save() {
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
-    std::fprintf(file, "shader_compile=%s\n", v.shader_skip ? "skip" : "wait");
+    static constexpr const char* compile_modes[] = {"wait", "skip", "balanced"};
+    std::fprintf(file, "shader_compile=%s\n",
+                 compile_modes[std::clamp(v.shader_compile.load(), 0, 2)]);
     std::fclose(file);
 }
 

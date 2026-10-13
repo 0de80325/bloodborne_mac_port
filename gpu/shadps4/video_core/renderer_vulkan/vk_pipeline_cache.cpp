@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -417,16 +418,53 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     return it != graphics_pipelines.end() ? Drawable(it->second.get()) : nullptr;
 }
 
+namespace {
+// shader_compile=balanced: time the command thread may wait for pipelines still compiling,
+// refilled at BB_COMPILE_BUDGET_MS (default 6) per 60 Hz frame and never more than one frame's
+// worth, so a burst of new shaders costs a short hitch and the rest of their draws are skipped.
+// Only the command thread selects pipelines.
+class WaitBudget {
+public:
+    /// Waits up to the budget left for `pipeline`; true when it is ready.
+    bool Wait(const Pipeline& pipeline) {
+        const auto now = std::chrono::steady_clock::now();
+        tokens = std::min(budget_ns, tokens + std::chrono::duration<double, std::nano>(
+                                                  now - last).count() * budget_ns / frame_ns);
+        const bool ready = pipeline.WaitReady(u64(tokens));
+        last = std::chrono::steady_clock::now();
+        tokens = std::max(0.0, tokens - std::chrono::duration<double, std::nano>(last - now).count());
+        return ready;
+    }
+
+private:
+    static constexpr double frame_ns = 1e9 / 60.0;
+    const double budget_ns = [] {
+        const char* value = std::getenv("BB_COMPILE_BUDGET_MS");
+        return (value ? std::max(0.0, std::atof(value)) : 6.0) * 1e6;
+    }();
+    double tokens = budget_ns;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+};
+} // namespace
+
 // bbport: the pipeline a draw may use: null when the driver rejected it, or while it is still
-// compiling on the creation pool and the player chose shader_compile=skip. Otherwise a pipeline
-// still compiling is returned and the recording thread waits for it (Rasterizer::Draw).
+// compiling on the creation pool and shader_compile is skip, or balanced with the wait budget
+// spent. Otherwise a pipeline still compiling is returned and the recording thread waits for it
+// (Rasterizer::Draw).
 const GraphicsPipeline* PipelineCache::Drawable(const GraphicsPipeline* pipeline) {
     if (!pipeline->IsReady()) {
-        if (BbSettings::Get().shader_skip.load(std::memory_order_relaxed)) {
+        const int mode = BbSettings::Get().shader_compile.load(std::memory_order_relaxed);
+        if (mode == BbSettings::ShaderBalanced) {
+            static WaitBudget budget;
+            budget.Wait(*pipeline);
+        }
+        if (mode != BbSettings::ShaderWait && !pipeline->IsReady()) {
             BbStats::compile_skipped_draws.fetch_add(1, std::memory_order_relaxed);
             return nullptr;
         }
-        return pipeline;
+        if (!pipeline->IsReady()) {
+            return pipeline;
+        }
     }
     return pipeline->Handle() ? pipeline : nullptr;
 }

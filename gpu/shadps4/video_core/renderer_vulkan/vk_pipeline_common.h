@@ -48,6 +48,9 @@ public:
     /// bbport: the handle once the creation pool has built it; null when the driver rejected it.
     vk::Pipeline WaitHandle() const;
 
+    /// bbport: waits up to `max_ns` for the creation pool; true once the pipeline is ready.
+    bool WaitReady(u64 max_ns) const;
+
     vk::PipelineLayout GetLayout() const noexcept {
         return *pipeline_layout;
     }

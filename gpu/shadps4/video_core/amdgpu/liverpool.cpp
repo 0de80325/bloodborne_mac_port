@@ -38,6 +38,13 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+// bbport: bad-packet diagnostics (DumpBadPacket). Declared here, outside namespace AmdGpu: the GPU
+// library links with -undefined dynamic_lookup, so a misplaced declaration became a null call.
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+namespace Libraries::GnmDriver {
+bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes);
+}
+
 namespace AmdGpu {
 
 static const char* dcb_task_name{"DCB_TASK"};
@@ -112,10 +119,6 @@ void Liverpool::ProcessCommands() {
     }
 }
 
-extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
-namespace Libraries::GnmDriver {
-bool BbArenaSource(uintptr_t copy, u64* guest, u64* bytes);
-}
 
 // bbport: a split-mode command buffer is parsed from a copy made at submit. Compares the copy with
 // the game's buffer as it is now (read without faulting): equal around the bad packet means the

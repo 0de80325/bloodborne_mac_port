@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
@@ -17,7 +18,6 @@
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 
-#include "bbport_cpu.h"
 #include "bbport_toggles.h"
 #include "common/thread.h"
 #include "shader_recompiler/resource.h"
@@ -27,6 +27,15 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
+
+namespace {
+// Stats in nanoseconds (the arm64 cycle counter is 24 MHz before the M4).
+u64 ElapsedNs(std::chrono::steady_clock::time_point start) {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now() - start)
+                   .count());
+}
+} // namespace
 
 Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorHeap& desc_heap_,
                    const Shader::Profile& profile_, vk::PipelineCache pipeline_cache,
@@ -43,13 +52,28 @@ Pipeline::~Pipeline() {
 
 vk::Pipeline Pipeline::WaitHandle() const {
     if (building.load(std::memory_order_acquire) != 0) {
-        const u64 start = bbport::CpuCycles();
+        const auto start = std::chrono::steady_clock::now();
         while (building.load(std::memory_order_acquire) != 0) {
             building.wait(1, std::memory_order_acquire);
         }
-        BbStats::compile_wait_ns.fetch_add(bbport::CpuCycles() - start, std::memory_order_relaxed);
+        BbStats::compile_wait_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
     }
     return *pipeline;
+}
+
+bool Pipeline::WaitReady(u64 max_ns) const {
+    if (IsReady()) {
+        return true;
+    }
+    // std::atomic::wait has no timeout; builds take milliseconds, so poll finely.
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::nanoseconds(max_ns);
+    bool ready = false;
+    while (!(ready = IsReady()) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    BbStats::compile_wait_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
+    return ready;
 }
 
 void Pipeline::BuildAsync(std::function<void()> build) {
@@ -59,10 +83,17 @@ void Pipeline::BuildAsync(std::function<void()> build) {
     }
     building.store(1, std::memory_order_relaxed);
     PipelineBuilder::Submit([this, build = std::move(build)] {
-        const u64 start = bbport::CpuCycles();
+        const auto start = std::chrono::steady_clock::now();
+        // BB_COMPILE_DELAY_MS: test knob, slows every build as a cold Metal compiler cache does.
+        static const int delay_ms = [] {
+            const char* value = std::getenv("BB_COMPILE_DELAY_MS");
+            return value ? std::atoi(value) : 0;
+        }();
+        if (delay_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        }
         build();
-        BbStats::background_build_ns.fetch_add(bbport::CpuCycles() - start,
-                                               std::memory_order_relaxed);
+        BbStats::background_build_ns.fetch_add(ElapsedNs(start), std::memory_order_relaxed);
         BbStats::background_builds.fetch_add(1, std::memory_order_relaxed);
         building.store(0, std::memory_order_release);
         building.notify_all();
