@@ -104,12 +104,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
   hoist the remaining copies; (2) put consecutive dispatches in one compute encoder; (3) the 47
   tessellated draws per frame each split a pass (MoltenVK's emulation): batch them or emulate
   tessellation ourselves; (4) attachment-less vertex-only passes (~20/frame) folded together.
-- **Shader compilation off the render thread.** *Now:* cached pipelines preload serially at start
-  (0.3–0.4 s); new ones compile on the GPU command thread when first drawn (~1–3.5 ms each, a
-  hitch). *Refinement:* preload on all cores; the draw-preparation workers start compiles of
-  pipelines they find missing ahead of the command thread on a background pool; optionally skip a
-  draw whose pipeline is still compiling instead of waiting (no hitch, an object missing for a
-  few frames).
+- **Shader compilation (done 2026-10-13: background pipeline creation, `shader_compile=wait|skip`).**
+  Pipeline creation (~70% of a new shader's cost) runs on 4 utility-QoS threads; the preload no
+  longer blocks start. *Remaining:* our own GCN→SPIR-V translation (~30%) still runs on the GPU
+  command thread; the draw-preparation workers could start compiles for pipelines they find
+  missing ahead of it; compute dispatches always wait (skipping one could corrupt later frames).
 - **Fixed 2026-10-13 (biggest win so far):** `NoContraction` on every float op became
   `[[clang::optnone]]` helper calls in MSL; dropped in fragment/compute shaders: city respawn
   spot 39 → 60 FPS (vsync cap), GPU 19.6 → 12.1 ms/frame. *Remaining:* vertex stages keep it

@@ -301,6 +301,16 @@ passes are ~3 ms of fixed GPU cost per frame, independent of resolution — the 
 own shader cache warm); pipelines the game has not used before compile on the GPU command thread
 when first drawn, ~1–3.5 ms each (more when Metal's cache is cold): the in-game hitches.
 
+**Background pipeline creation (2026-10-13).** With an empty shader cache (macOS's own Metal
+cache warm), a new shader cost ~1.2 ms: ~70% creating the pipeline (MoltenVK SPIR-V→MSL and the
+Metal compiler), ~30% our translation. `FreePermIndex` (a `stat()` per probe) ran on every program
+lookup and cost more than both during loads; now only for new permutations. Pipeline creation now
+runs on a 4-thread pool (`BB_PIPELINE_THREADS`): level load from an empty cache, compile time on
+the GPU command thread 440 → 130 ms; the render path waited ~260 ms for the pool with
+`shader_compile=wait` (worst loading frame 248 → 187 ms) and ~35 ms with `skip` (76 ms; ~2,000
+draws skipped during the load, none after). Warm cache: 217 pipelines built in the background,
+nothing waited, start-up preload step 290–390 → 110 ms. Gameplay images correct in both modes.
+
 **Pipeline cache permutations (fixed):** Metal rejected 6 pipelines per session once the cache was
 kept between sessions ("cannot reserve 'buffer' resource location at index 0"): a new shader
 permutation took the index of a stored one the session had not loaded and overwrote it, and
