@@ -4,6 +4,7 @@
 #pragma once
 
 #include <deque>
+#include <thread>
 
 #include <condition_variable>
 
@@ -136,6 +137,13 @@ private:
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
+    // bbport: frame timeline (BB_FRAME_STATS): flips waiting for GPU completion. Last, so the
+    // thread stops before anything it uses is destroyed.
+    void WatchFrameCompletion(u64 tick, u64 submitted);
+    std::mutex watch_mutex;
+    std::condition_variable_any watch_cv;
+    std::deque<std::pair<u64, u64>> watch_queue;
+    std::jthread watch_thread;
 };
 
 } // namespace Vulkan

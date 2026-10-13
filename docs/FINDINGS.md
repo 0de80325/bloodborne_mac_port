@@ -258,9 +258,9 @@ resolution as that allows. Uncapped for measurement: `BB_PRESENT_MODE=Immediate 
 
 | Output | Scene | Path | FPS uncapped | Limit |
 |---|---|---|---|---|
-| 1080p MetalFX Quality (default) | 1280x720 | startup patch | 65–77 (60 locked) | draw recording thread |
-| 1080p native | 1920x1080 | — | 61–63 | draw recording thread |
-| 4K MetalFX Performance | 1916x1078 | startup patch | ~52 | draw recording thread (GPU 69% busy) |
+| 1080p MetalFX Quality (default) | 1280x720 | startup patch | 65–77 (60 locked) | — |
+| 1080p native | 1920x1080 | — | 61–63 | GPU timeline incl. render-pass overhead (see frame timeline) |
+| 4K MetalFX Performance | 1916x1078 | startup patch | ~52 | GPU 69% busy (not yet broken down) |
 | 1440p native | 2560x1440 | live | 49 | GPU (~17.5 ms of a 19–20 ms frame) |
 | 4K MetalFX Quality | 2560x1440 | live | 43 | GPU |
 
@@ -275,6 +275,31 @@ resolution as that allows. Uncapped for measurement: `BB_PRESENT_MODE=Immediate 
 - Frame times snap to 480 Hz vblank ticks (2.08 ms): 49 FPS is 10 ticks per frame.
 - Dropping NoContraction from vertex shaders too ("precise nowhere", with invariant positions)
   broke geometry: some vertex shaders need exact rounding. Vertex stages keep it.
+
+**Frame timeline (2026-10-13, `BB_FRAME_STATS=1` "Frame timeline" line, 1080p native uncapped,
+~61 FPS):** per 16.4 ms frame the draw recording thread records for ~5.4 ms, spends 4.8 ms in the
+flip's `vkQueueSubmit` (MoltenVK encoding the frame), **waits 4.5 ms for the GPU to finish the
+previous frame** (frames-ahead bound) and idles 1.7 ms; the command thread waits ~10 ms for it.
+Each flip finishes on the GPU ~20 ms after its submit, one every ~16.4 ms. With
+`BB_FRAMES_AHEAD=2` the latency doubles (38 ms) and the rate stays (16.8 ms): **the GPU timeline,
+not the CPU, limits 1080p native**, so CPU work (encoding, recording) would not raise it.
+
+**Why the GPU timeline is longer than its busy time:** a Metal System Trace shows the GPU idle
+~3.8 ms per frame (18–24% of wall time), in 0.3–2 ms gaps inside one command buffer, almost all
+right after a render pass's fragment work, **recurring every ~115 Metal encoders** (every ~85 with
+a pass per draw) whatever the passes around them are. The frame has **~408 encoders**: 190 render
+passes, 81 buffer-copy blits, 77 compute encoders (one per dispatch), 47 tessellation compute
+encoders (MoltenVK's tessellation emulation, each also splitting its render pass). A standalone
+Metal test (`tools/metal_encoder_cost/encoder_cost.m`, 1080p, 3 attachments loaded and stored,
+same small draw): **a render pass costs ~13–16 µs of GPU time** (8.6 µs each at 50 per command
+buffer, 14–16 µs at 100–400) **against ~0.7 µs for the same draw inside one pass**; a compute
+encoder costs ~1 µs more than a dispatch in a shared encoder; a blit encoder ~4 µs. So ~190
+passes are ~3 ms of fixed GPU cost per frame, independent of resolution — the lever for both
+1080p headroom and 1440p (GPU ~17.5 ms; 60 needs ≤ ~15).
+
+**Pipeline preload:** the 217 cached pipelines preload serially in 0.29–0.39 s at start (macOS's
+own shader cache warm); pipelines the game has not used before compile on the GPU command thread
+when first drawn, ~1–3.5 ms each (more when Metal's cache is cold): the in-game hitches.
 
 **Pipeline cache permutations (fixed):** Metal rejected 6 pipelines per session once the cache was
 kept between sessions ("cannot reserve 'buffer' resource location at index 0"): a new shader

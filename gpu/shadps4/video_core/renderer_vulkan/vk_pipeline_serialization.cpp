@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -370,6 +371,7 @@ void PipelineCache::WarmUp() {
     u32 num_pipelines{};
     u32 num_total_pipelines{};
     u32 num_old_format{};
+    const auto warm_start = std::chrono::steady_clock::now();
 
     Storage::DataBase::Instance().ForEachBlob(
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
@@ -400,8 +402,11 @@ void PipelineCache::WarmUp() {
             }
         });
 
-    std::printf("Pipeline cache: preloaded %u of %u pipelines\n", num_pipelines,
-                num_total_pipelines);
+    std::printf("Pipeline cache: preloaded %u of %u pipelines in %.0f ms\n", num_pipelines,
+                num_total_pipelines,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          warm_start)
+                    .count());
     // bbport: clear only for entries of an older format (a one-time migration). A pipeline that
     // fails to preload (e.g. a permutation index from another session) compiles when first
     // used; clearing for it wiped the whole cache every session (one such entry was always

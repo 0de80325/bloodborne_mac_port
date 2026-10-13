@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_cpu.h"
 #include "bbport_gpu_capture.h"
+#include "bbport_toggles.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -432,7 +434,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
+    const u64 flush_start = bbport::CpuCycles();
     draw_scheduler.Flush(info);
+    const u64 flush_end = bbport::CpuCycles();
+    BbStats::flip_submit_ns.fetch_add(flush_end - flush_start, std::memory_order_relaxed);
+    if (BbStats::enabled) {
+        WatchFrameCompletion(frame->ready_tick, flush_end);
+    }
 
     // bbport: the GPU command thread runs at most BB_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -449,11 +457,50 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             const u64 tick = recent_frame_ticks.front();
             recent_frame_ticks.pop_front();
             if (recent_frame_ticks.size() == frames_ahead) {
+                const u64 wait_start = bbport::CpuCycles();
                 draw_scheduler.Wait(tick);
+                BbStats::frames_ahead_ns.fetch_add(bbport::CpuCycles() - wait_start,
+                                                   std::memory_order_relaxed);
             }
         }
     }
     return frame;
+}
+
+// bbport: frame timeline (BB_FRAME_STATS): a helper thread waits for each flip's submission
+// and adds the time from vkQueueSubmit's return to the GPU finishing it.
+void Presenter::WatchFrameCompletion(u64 tick, u64 submitted) {
+    std::scoped_lock lk{watch_mutex};
+    if (!watch_thread.joinable()) {
+        watch_thread = std::jthread([this](std::stop_token stop) {
+            Common::SetCurrentThreadName("bb:FrameWatch");
+            u64 last_done = 0;
+            while (!stop.stop_requested()) {
+                std::pair<u64, u64> item;
+                {
+                    std::unique_lock wl{watch_mutex};
+                    watch_cv.wait(wl, stop, [this] { return !watch_queue.empty(); });
+                    if (stop.stop_requested()) {
+                        return;
+                    }
+                    item = watch_queue.front();
+                    watch_queue.pop_front();
+                }
+                draw_scheduler.GetWorkSemaphore()->Wait(item.first);
+                const u64 done = bbport::CpuCycles();
+                BbStats::gpu_latency_ns.fetch_add(done - item.second, std::memory_order_relaxed);
+                if (last_done) {
+                    BbStats::gpu_done_gap_ns.fetch_add(done - last_done, std::memory_order_relaxed);
+                    BbStats::gpu_done_frames.fetch_add(1, std::memory_order_relaxed);
+                }
+                last_done = done;
+            }
+        });
+    }
+    if (watch_queue.size() < 16) {
+        watch_queue.emplace_back(tick, submitted);
+        watch_cv.notify_one();
+    }
 }
 
 Frame* Presenter::PrepareBlankFrame(bool present_thread) {

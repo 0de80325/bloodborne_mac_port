@@ -510,6 +510,30 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // Frame timeline: where each frame's time goes on the GPU side (ms per frame).
+            if (frames) {
+                const auto per_frame = [&](std::atomic<u64>& total) {
+                    return total.exchange(0) / (frames * 1e6);
+                };
+                const double rec_busy = per_frame(BbStats::rec_busy_ns);
+                const double rec_idle = per_frame(BbStats::rec_idle_ns);
+                const double flip_submit = per_frame(BbStats::flip_submit_ns);
+                const double queue_submit = per_frame(BbStats::queue_submit_ns);
+                const double submits = double(BbStats::queue_submits.exchange(0)) / frames;
+                const double ahead = per_frame(BbStats::frames_ahead_ns);
+                const double drain = per_frame(BbStats::drain_ns);
+                const u64 gpu_frames = BbStats::gpu_done_frames.exchange(0);
+                const double gpu_gap =
+                    gpu_frames ? BbStats::gpu_done_gap_ns.exchange(0) / (gpu_frames * 1e6) : 0.0;
+                const double gpu_latency =
+                    gpu_frames ? BbStats::gpu_latency_ns.exchange(0) / (gpu_frames * 1e6) : 0.0;
+                std::printf("Frame timeline (ms/frame): recording thread busy %.2f (flip submit "
+                            "%.2f, frames-ahead wait %.2f), waiting for packets %.2f; "
+                            "vkQueueSubmit %.2f in %.1f calls; command thread waiting for "
+                            "recording %.2f; flip submit -> GPU done %.2f, GPU done every %.2f\n",
+                            rec_busy, flip_submit, ahead, rec_idle, queue_submit, submits, drain,
+                            gpu_latency, gpu_gap);
+            }
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;

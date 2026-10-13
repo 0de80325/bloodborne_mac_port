@@ -147,4 +147,10 @@ inline std::atomic<std::uint64_t> gpu_signal_faults{0};
 /// Protection changes: calls and pages, those removing write access (TLB shootdowns) apart.
 inline std::atomic<std::uint64_t> protect_calls{0}, protect_pages{0}, protect_revoke_calls{0},
     protect_revoke_pages{0};
+/// Frame timeline (BB_FRAME_STATS, ns totals): the draw recording thread busy and waiting for
+/// packets, vkQueueSubmit (MoltenVK encodes there) at the flip and elsewhere, the frames-ahead
+/// wait, flip submission to GPU completion, and stage A waiting for stage B (drains).
+inline std::atomic<std::uint64_t> rec_busy_ns{0}, rec_idle_ns{0}, flip_submit_ns{0},
+    queue_submit_ns{0}, queue_submits{0}, frames_ahead_ns{0}, gpu_latency_ns{0}, gpu_done_frames{0},
+    gpu_done_gap_ns{0}, drain_ns{0}, compile_wait_ns{0};
 } // namespace BbStats

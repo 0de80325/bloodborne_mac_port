@@ -21,6 +21,7 @@
 #include <memory>
 #include <thread>
 #include "bbport_cpu.h"
+#include "bbport_toggles.h"
 
 #include "common/assert.h"
 #include "common/thread.h"
@@ -118,6 +119,7 @@ public:
             }
         }
         const u64 waited = bbport::CpuCycles() - start;
+        BbStats::drain_ns.fetch_add(waited, std::memory_order_relaxed); // 1 GHz counter
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
     }
@@ -170,6 +172,7 @@ private:
             // and sleep only after a longer pause (between frames).
             u64 available = published.load(std::memory_order_acquire);
             if (available == at) {
+                const u64 idle_start = bbport::CpuCycles();
                 // With few hardware threads (Steam Deck: 8) a long spin takes time from the
                 // game's own threads. BB_PIPE_SPIN_US overrides.
                 static const auto spin_time = std::chrono::microseconds([] {
@@ -195,6 +198,8 @@ private:
                     }
                     available = published.load(std::memory_order_acquire);
                 }
+                BbStats::rec_idle_ns.fetch_add(bbport::CpuCycles() - idle_start,
+                                               std::memory_order_relaxed);
             }
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
@@ -204,7 +209,9 @@ private:
             }
             const u64 start = bbport::CpuCycles();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
-            busy_cycles.fetch_add(bbport::CpuCycles() - start, std::memory_order_relaxed);
+            const u64 busy = bbport::CpuCycles() - start;
+            busy_cycles.fetch_add(busy, std::memory_order_relaxed);
+            BbStats::rec_busy_ns.fetch_add(busy, std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }

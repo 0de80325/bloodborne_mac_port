@@ -97,6 +97,19 @@ Each item: what was done for now, what the refinement is, and where it lives.
   61–63, 4K Performance ~52, 1440p 49, 4K Quality 43 (FINDINGS). Two levers: (a) the draw
   recording thread (MoltenVK encoding in `vkQueueSubmit` ~43%, render pass begins ~12%) caps
   1080p-class scenes at ~62–67 FPS; (b) GPU time at 1440p (~17.5 ms; 60 needs ≤ ~15 ms).
+- **Render-pass count is a GPU cost after all (measured 2026-10-13, FINDINGS "Frame timeline").**
+  At 1080p native the GPU timeline, not the CPU, sets the frame rate; ~408 Metal encoders per
+  frame (190 render passes) cost ~13–16 µs of GPU time per render pass and leave the GPU idle
+  ~3.8 ms/frame. *Refinement, in order:* (1) merge passes split by uploads/copies (~38/frame) and
+  hoist the remaining copies; (2) put consecutive dispatches in one compute encoder; (3) the 47
+  tessellated draws per frame each split a pass (MoltenVK's emulation): batch them or emulate
+  tessellation ourselves; (4) attachment-less vertex-only passes (~20/frame) folded together.
+- **Shader compilation off the render thread.** *Now:* cached pipelines preload serially at start
+  (0.3–0.4 s); new ones compile on the GPU command thread when first drawn (~1–3.5 ms each, a
+  hitch). *Refinement:* preload on all cores; the draw-preparation workers start compiles of
+  pipelines they find missing ahead of the command thread on a background pool; optionally skip a
+  draw whose pipeline is still compiling instead of waiting (no hitch, an object missing for a
+  few frames).
 - **Fixed 2026-10-13 (biggest win so far):** `NoContraction` on every float op became
   `[[clang::optnone]]` helper calls in MSL; dropped in fragment/compute shaders: city respawn
   spot 39 → 60 FPS (vsync cap), GPU 19.6 → 12.1 ms/frame. *Remaining:* vertex stages keep it

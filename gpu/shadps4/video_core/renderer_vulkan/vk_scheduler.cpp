@@ -643,7 +643,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
+    const u64 submit_start = bbport::CpuCycles();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    BbStats::queue_submit_ns.fetch_add(bbport::CpuCycles() - submit_start,
+                                       std::memory_order_relaxed);
+    BbStats::queue_submits.fetch_add(1, std::memory_order_relaxed);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();
