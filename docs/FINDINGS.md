@@ -301,6 +301,18 @@ passes are ~3 ms of fixed GPU cost per frame, independent of resolution — the 
 own shader cache warm); pipelines the game has not used before compile on the GPU command thread
 when first drawn, ~1–3.5 ms each (more when Metal's cache is cold): the in-game hitches.
 
+**Why render passes end (2026-10-13, `BB_PASS_STATS=1`, 1080p native, ~190 passes/frame):**
+~33/frame other attachments, ~45 a target about to be sampled (render-to-texture), ~26 buffer
+uploads (`CopyBuffer`), ~15 the game's GPU copies (`MultiCopy`), ~22 dispatches; only ~32/frame
+reopen the same attachments right after (mostly after copies). Per frame the game also issues
+**~37 tessellated draws and ~32 rect/quad-list draws** (emulated with tessellation), each of which
+MoltenVK splits the render pass around (compute for the vertex/control stages). Upper bound at
+1440p native (`BB_DROP_TESS`, wrong image): dropping the tessellated draws 49.1 → 51.9 FPS
+(~1.1 ms/frame including their own shading). Dropping rect lists is not measurable that way (they
+include full-screen post passes; the game stalled at the title). So pass merging is worth roughly
+0.5 ms (copy splits) + ≤ 1 ms (tessellation) + ≤ ~1 ms (rect lists) at 1440p, short of the ~3.7 ms
+1440p needs for 60 on its own.
+
 **Background pipeline creation (2026-10-13).** With an empty shader cache (macOS's own Metal
 cache warm), a new shader cost ~1.2 ms: ~70% creating the pipeline (MoltenVK SPIR-V→MSL and the
 Metal compiler), ~30% our translation. `FreePermIndex` (a `stat()` per probe) ran on every program

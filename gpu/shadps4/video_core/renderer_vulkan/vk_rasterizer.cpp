@@ -917,6 +917,31 @@ bool Rasterizer::FilterDrawPasses() const {
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
+    // BB_DROP_TESS=1/2/3 (measurement only, wrong image): drop tessellated draws (1), rect and
+    // quad lists (2) or both (3), to bound what MoltenVK's tessellation pass splits cost.
+    static const int drop_tess = [] {
+        const char* env = std::getenv("BB_DROP_TESS");
+        return env ? std::atoi(env) : 0;
+    }();
+    if (drop_tess) {
+        const auto& r = liverpool->regs;
+        const bool rect = r.primitive_type == AmdGpu::PrimitiveType::RectList ||
+                          r.primitive_type == AmdGpu::PrimitiveType::QuadList;
+        if (((drop_tess & 1) && r.stage_enable.hs_en) ||
+            ((drop_tess & 2) && rect && !r.stage_enable.hs_en)) {
+            return;
+        }
+    }
+    if (BbStats::enabled) {
+        // Draws MoltenVK runs through its tessellation emulation (a pass split each).
+        const auto& r = liverpool->regs;
+        if (r.stage_enable.hs_en) {
+            BbStats::tess_draws.fetch_add(1, std::memory_order_relaxed);
+        } else if (r.primitive_type == AmdGpu::PrimitiveType::RectList ||
+                   r.primitive_type == AmdGpu::PrimitiveType::QuadList) {
+            BbStats::rect_draws.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.

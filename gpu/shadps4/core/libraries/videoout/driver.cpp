@@ -530,9 +530,11 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::printf("Frame timeline (ms/frame): recording thread busy %.2f (flip submit "
                             "%.2f, frames-ahead wait %.2f), waiting for packets %.2f; "
                             "vkQueueSubmit %.2f in %.1f calls; command thread waiting for "
-                            "recording %.2f; flip submit -> GPU done %.2f, GPU done every %.2f\n",
+                            "recording %.2f; flip submit -> GPU done %.2f, GPU done every %.2f; "
+                            "per frame %.1f tessellated, %.1f rect/quad-list draws\n",
                             rec_busy, flip_submit, ahead, rec_idle, queue_submit, submits, drain,
-                            gpu_latency, gpu_gap);
+                            gpu_latency, gpu_gap, double(BbStats::tess_draws.exchange(0)) / frames,
+                            double(BbStats::rect_draws.exchange(0)) / frames);
             }
             if (const u64 built = BbStats::background_builds.exchange(0)) {
                 std::printf("Pipelines: %llu built in the background (%.1f ms on the creation "
