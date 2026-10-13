@@ -97,9 +97,13 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 }
 
+// 1 KiB pages; the tag is the low 16 bits of the submission tick. A tag that wraps around can only
+// make a page look used (no hoist), never unused.
+static constexpr u64 HoistPageBits = 10;
+
 void Runtime::RegisterHoistTarget(const VideoCore::Buffer* buffer, u64 size) {
-    const u64 pages = (size + 4095) >> 12;
-    hoist_targets[buffer] = {std::make_unique<u32[]>(pages), pages};
+    const u64 pages = (size + (1ull << HoistPageBits) - 1) >> HoistPageBits;
+    hoist_targets[buffer] = {std::make_unique<u16[]>(pages), pages};
 }
 
 void Runtime::NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64 size) {
@@ -107,10 +111,10 @@ void Runtime::NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64
     if (it == hoist_targets.end() || size == 0) {
         return;
     }
-    const u32 tick = static_cast<u32>(scheduler.CurrentTick());
-    const u64 last = std::min((offset + size - 1) >> 12, it->second.pages - 1);
-    for (u64 page = offset >> 12; page <= last; ++page) {
-        std::atomic_ref<u32>(it->second.tick[page]).store(tick, std::memory_order_relaxed);
+    const u16 tick = static_cast<u16>(scheduler.CurrentTick());
+    const u64 last = std::min((offset + size - 1) >> HoistPageBits, it->second.pages - 1);
+    for (u64 page = offset >> HoistPageBits; page <= last; ++page) {
+        std::atomic_ref<u16>(it->second.tick[page]).store(tick, std::memory_order_relaxed);
     }
 }
 
@@ -123,17 +127,17 @@ bool Runtime::HoistCopy(const VideoCore::Buffer* src, const VideoCore::Buffer* d
     if (it == hoist_targets.end()) {
         return false;
     }
-    const u32 tick = static_cast<u32>(scheduler.CurrentTick());
+    const u16 tick = static_cast<u16>(scheduler.CurrentTick());
     for (const auto& copy : copies) {
         if (copy.size == 0) {
             continue;
         }
-        const u64 last = (copy.dstOffset + copy.size - 1) >> 12;
+        const u64 last = (copy.dstOffset + copy.size - 1) >> HoistPageBits;
         if (last >= it->second.pages) {
             return false;
         }
-        for (u64 page = copy.dstOffset >> 12; page <= last; ++page) {
-            if (std::atomic_ref<u32>(it->second.tick[page]).load(std::memory_order_relaxed) ==
+        for (u64 page = copy.dstOffset >> HoistPageBits; page <= last; ++page) {
+            if (std::atomic_ref<u16>(it->second.tick[page]).load(std::memory_order_relaxed) ==
                 tick) {
                 return false; // used earlier in this submission: the copy must stay in order
             }

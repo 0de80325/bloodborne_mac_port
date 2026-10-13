@@ -32,7 +32,7 @@ public:
 
     /// bbport: upload hoisting. A copy issued inside a render pass may run ahead of the whole
     /// submission (Scheduler::RecordHoistedCopy) when nothing in this submission has used its
-    /// destination yet; then the pass stays open. Tracked per 4 KiB page of registered buffers
+    /// destination yet; then the pass stays open. Tracked per 1 KiB page of registered buffers
     /// (the buffer cache arenas), with the submission's tick.
     void RegisterHoistTarget(const VideoCore::Buffer* buffer, u64 size);
     void NoteSubmissionUse(const VideoCore::Buffer* buffer, u64 offset, u64 size);
@@ -125,7 +125,7 @@ public:
 
 private:
     struct HoistPages {
-        std::unique_ptr<u32[]> tick; ///< low 32 bits of the submission tick that used the page
+        std::unique_ptr<u16[]> tick; ///< low 16 bits of the submission tick that used the page
         u64 pages;
     };
     std::unordered_map<const VideoCore::Buffer*, HoistPages> hoist_targets;
