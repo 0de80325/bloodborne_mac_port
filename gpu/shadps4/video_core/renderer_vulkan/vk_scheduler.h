@@ -908,6 +908,10 @@ private:
     const Instance& instance;
     Semaphore work_semaphore;
     CommandPool command_pool;
+    /// bbport: hoisted copies are recorded on the draw thread while the recorder thread records
+    /// current_cmdbuf, so their command buffers come from a pool of their own (a VkCommandPool
+    /// is externally synchronized: MoltenVK allocates each command's object from its pool).
+    CommandPool upload_pool;
     DynamicState dynamic_state;
     SubmitFunc on_submit{};
     vk::CommandBuffer current_cmdbuf;

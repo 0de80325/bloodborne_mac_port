@@ -58,7 +58,8 @@ void Pass(vk::CommandBuffer cmdbuf, const std::string& label) {
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
-    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore},
+      upload_pool{instance, &work_semaphore} {
     // bbport: BB_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("BB_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -548,7 +549,7 @@ void Scheduler::RecordHoistedCopy(vk::Buffer src, vk::Buffer dst,
                                   std::span<const vk::BufferCopy> copies) {
     std::scoped_lock lk{upload_mutex};
     if (!upload_open) {
-        upload_cmdbuf = command_pool.Commit();
+        upload_cmdbuf = upload_pool.Commit();
         Check(upload_cmdbuf.begin(vk::CommandBufferBeginInfo{
             .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
         }));
