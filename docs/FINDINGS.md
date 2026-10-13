@@ -383,6 +383,30 @@ hoisting, ~17 per frame), so zero-copy would not remove these splits.
   the GPU has run them. Copies snapshot the data; reading guest memory in place would race with
   the game reusing its buffers unless fences are signalled at GPU completion.
 
+### Where the 1440p GPU idle time is (2026-10-13 evening, on battery)
+
+Metal System Trace, 1440p native live, ~49 FPS; GPU busy 15.3 ms of a ~20.5 ms frame.
+
+- **Not CPU starvation.** Comparing each Metal command buffer's commit time
+  (`metal-application-command-buffer-submissions`) with the GPU timeline: the GPU waits for a
+  commit 0.1 ms/frame. Command buffers are committed a median 13.6 ms before the GPU reaches
+  them. Encoding earlier or in smaller submits would not help.
+- **~4.4 ms/frame of idle with work queued**, as ~4–5 stalls of ~1 ms each inside the frame's
+  main command buffer (~580 encoders), at **fixed positions every frame** (before encoder ~110,
+  ~385, ~506, smaller at ~238). With `BB_PASS_LOG` they sit around the 2560x1440 G-buffer passes
+  (vs 4cd21a0f, c6cdba2b) and the 5x5/10x10 B10G11R11 downsample chain, i.e. even between tiny
+  passes.
+- Ruled out: other processes' GPU work during the stalls (WindowServer etc.: ~0), GPU
+  performance-state changes (82 of 601 stalls near one), driver memory wiring (4 of 584), and
+  a per-command-buffer encoder limit (synthetic: no step at 128 encoders, also with mixed
+  render/compute/blit encoders and 48 targets).
+- **Measurement caveat:** the Mac ran on battery from ~14:00 (pmset log). The GPU performance
+  state varies from run to run (Minimum/Medium/Maximum, on mains as well), and on battery a
+  synthetic render pass cost ~32 µs instead of 13–16 µs. Compare variants within one session
+  and check `gpu-performance-state-intervals` in each trace.
+- Tools (scratch, not in repo): commit-vs-GPU join, stall position per command buffer, stall
+  labels via the `pass_trace.py` join.
+
 ## Part 3 — Open issues
 
 | Issue | Status |
