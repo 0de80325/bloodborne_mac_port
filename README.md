@@ -58,14 +58,17 @@ geometry corruption at 1440p (scenes above 1080p now use live resolution changes
 
 ### Latest changes (2026-10-14)
 
-- **Load crash found and defused.** The intermittent crash while loading an area (the GPU
-  window closing during a loading screen) is a race in the game itself: the main thread
-  records cloth/texture compute jobs into the render thread's command stream without a lock,
-  and the render thread's next loading-screen frame starts in the middle of them. On a PS4 the
+- **Load crash fixed.** The intermittent crash while loading an area (the GPU window closing
+  during a loading screen) was a race in the game itself: the main thread records
+  cloth/texture compute jobs into the render thread's command stream without a lock, and the
+  render thread's next loading-screen frame could start in the middle of them. On a PS4 the
   main thread is done before the next vsync; under Rosetta it can take ~7 ms longer, more when
-  the Mac is busy. The GPU process now logs and skips the corrupted commands instead of
-  exiting: in tests where the race hit 6 times in 9 runs, nothing crashed. The proper fix
-  (making the two threads take turns) is in the backlog.
+  the Mac is busy. The port now hooks both game functions and makes them take turns (the main
+  thread waits well under a millisecond); in 15 test loads the race was caught 10 times and
+  never corrupted anything. As a safety net, corrupted GPU commands are logged and skipped
+  instead of ending the game.
+- **Sharper on Retina displays:** the window uses the display's real pixels (full screen on a
+  MacBook was rendered at half resolution and stretched).
 - **Full screen works** (⌃⌘F or the green window button). It used to freeze the picture.
 - **Lower display latency:** two swapchain images instead of three, so the time from the
   game presenting a frame to it reaching the screen went from 48.5 to 31.7 ms.
@@ -80,12 +83,10 @@ geometry corruption at 1440p (scenes above 1080p now use live resolution changes
 
 ### Known issues
 
-- **Missing geometry after a respawn or reload** (character's legs, a flight of stairs),
-  reported on an M4 Max and an M2 Pro. A relaunch brings it back. If you see it, the log
-  lines around the respawn help.
+- **Missing geometry after a respawn or reload** (character's legs, a flight of stairs, a
+  floor), reported on an M4 Max and an M2 Pro; a relaunch brings it back. It coincided with the
+  load race below, now fixed, so it may be gone: reports welcome.
 - **Occasional judder at a steady 60 FPS** (some game frames take 20–45 ms).
-- Full screen renders at point size rather than full Retina resolution.
-- During loads, the game race above can still briefly garble a loading-screen frame.
 
 ### What's next
 
@@ -93,7 +94,7 @@ geometry corruption at 1440p (scenes above 1080p now use live resolution changes
   passes). Each extra render pass costs ~13–16 µs of GPU time on Apple GPUs regardless of
   resolution — about 3 ms per frame — and leaves the GPU idle in periodic gaps. Merging passes
   is the main lever for 1440p and 4K at 60.
-- The proper fix for the load race, and the missing-geometry hunt.
+- Confirm the missing-geometry reports are gone; the frame-time judder.
 - A `.app` bundle (for now, `Bloodborne.command` launches from Finder; see below).
 
 Details:

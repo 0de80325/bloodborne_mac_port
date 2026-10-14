@@ -209,7 +209,9 @@ Each item: what was done for now, what the refinement is, and where it lives.
   skipped; root cause in the cloth-thread entry above.
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
-  on self-relock. *Refinement:* condvar-based timed locks.
+  on self-relock. *Refinement:* condvar-based timed locks. *Measured 2026-10-14 night:* a full
+  walk (load + Hunter's Dream) had **0 contended timed waits** (counters on the trylock loop),
+  so the game does not pay for this today; low priority.
 - **Rosetta stale translations on aliased memory:** code written through one guest alias and
   executed from another runs the old translation until a protection change on the executing
   alias. *Refinement:* toggle protection (RW→RX) on executable aliases after host writes, if

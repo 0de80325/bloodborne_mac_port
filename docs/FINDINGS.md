@@ -511,6 +511,13 @@ address moves none.
 - Cost: one uncontended mutex per render-thread frame; the main thread's step runs only during
   loads.
 
+### Retina drawable cost (2026-10-14 night)
+
+Full screen and windowed now use the display's pixels (`BB_HIGH_DPI=0` restores point size).
+Uncapped walks (`BB_PRESENT_MODE=Immediate BB_FPS_LIMIT=0`, 1080p, upscaler off), alternating
+two runs each: point size 1496x839 vs Retina 2992x1678: FPS per 5 s window 81–96 in both, Retina
+~0.5 FPS lower (~0.1 ms per frame for the larger present pass). Check slower Macs.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25
