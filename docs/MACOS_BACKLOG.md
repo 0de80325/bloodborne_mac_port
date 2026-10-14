@@ -124,6 +124,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
   (4–5 per 5 s → 0.6–0.8). *Remaining:* MetalFX keeps encode-at-submit (its command buffer
   queues behind a prefilled one); encode MetalFX into the frame's own Metal command buffer, or
   order it with an event, to give MetalFX the same gain. Re-measure in Central Yharnam.
+  *Tried 2026-10-15:* encoding MetalFX right after the submit, before the next command buffer
+  begins: no change (~38 late frames per 5 s with prefill). The spikes alternate: one frame
+  spends ~22 ms in "frame prep" (the upscaler step on the GPU thread), the next is a late game
+  frame; the presenter's submit takes exactly one vsync (16.7 ms). Profile where the upscaler
+  step blocks (a `sample` of bbgpu-host during a MetalFX + prefill run) before trying more.
 - **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
   stopped, the window stayed off screen at its old size while the game kept running). The
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue
