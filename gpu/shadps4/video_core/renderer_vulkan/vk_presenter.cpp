@@ -576,7 +576,14 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
-void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
+                        u32 present_id) {
+    const auto now_ns = [] {
+        return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count());
+    };
+    last_present = {now_ns(), 0, 0, 0};
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -601,6 +608,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             return;
         }
     }
+
+    last_present.acquired = now_ns();
 
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
@@ -726,14 +735,17 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
     scheduler.Flush(info);
+    last_present.submitted = now_ns();
 
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        swapchain.SetNextPresentId(present_id);
         if (!swapchain.Present()) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
+    last_present.presented = now_ns();
     BbGpuCapture::OnPresent(); // bbport: BB_GPU_CAPTURE one-frame Metal capture
 
     free_frame();

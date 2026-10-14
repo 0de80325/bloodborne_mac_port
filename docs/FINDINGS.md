@@ -446,6 +446,41 @@ other crash: `MapNumberConversion` UNREACHABLE for an SnormNz descriptor with da
 during the load (now a one-time warning; reads as zeros on the GPU). The bad packet's two
 diagnostics stay on for the next occurrence (MACOS_BACKLOG).
 
+The next walk run (2026-10-14) hit it while loading, and the submit check caught it in the
+game process: a 506-word DCB whose last 448 words were never written (zeros), right after a
+correct `sceGnmSetCsShader`. The command processor now skips type-0 packets as the hardware
+does (logged once per buffer); see MACOS_BACKLOG for what remains.
+
+### Frame spike log: where judder comes from (2026-10-14, on mains)
+
+`BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25
+frame periods after the previous one at any stage (`BB_SPIKE_MS` overrides), and a 5 s
+"Spikes (…): game, flip, present, display" count. Stages per frame: the game's submit (time
+stamped in bb-probe, carried in the submit record), arrival in the host, the command
+processor reaching the flip, frame preparation, the flip, acquire / submit / `vkQueuePresent`,
+and when the frame was actually shown (VK_GOOGLE_display_timing, enabled only with stats; Metal
+reports it on the uptime clock, converted). Each line also has what the GPU process did since
+the previous flip (GPU thread CPU time, draws, recording busy/idle, frames-ahead wait, recorder
+and host-copy waits, compiles).
+
+Walk in Central Yharnam, the user's settings (1080p, MetalFX Native AA), 24 windows (2 min):
+
+| | late frames |
+|---|---|
+| game submits (21–46 ms apart) | 30 |
+| flips | 24 |
+| presents | 19 |
+| **shown on screen a vsync late (33.3 ms)** | **9** |
+
+- The display stays at 16.7 ms through most game spikes (the queued frame absorbs them), but
+  the game's delta-time step does not: a 30–45 ms game frame moves the world further in one
+  displayed frame. That is judder at a steady 60 FPS.
+- Real dropped vsyncs follow GPU hiccups: a frames-ahead wait of 34–36 ms (the GPU took ~50 ms
+  for one frame), then the game's next submit is late too.
+- Runs of 4–5 frames with the recording thread busy 20–25 ms (normal ~15, same ~1025 draws), and
+  the present's submission blocked behind it (8–23 ms).
+- Display latency, `vkQueuePresent` to the screen: 34–76 ms, mean 51 (2–4 vsyncs).
+
 ## Part 3 — Open issues
 
 | Issue | Status |

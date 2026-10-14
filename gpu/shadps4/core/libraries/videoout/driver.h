@@ -106,6 +106,9 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        // bbport: frame spike log (steady-clock ns): the game's submit and its arrival here, the
+        // command processor reaching the flip, and the frame queued (after PrepareFrame).
+        u64 game_ns = 0, arrival_ns = 0, flip_packet_ns = 0, queued_ns = 0;
 
         operator bool() const noexcept {
             return frame != nullptr;

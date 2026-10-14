@@ -88,6 +88,14 @@ public:
 
     void SetHDR(bool hdr);
 
+    /// bbport: frame spike log: tags the next present with an id (VK_GOOGLE_display_timing).
+    void SetNextPresentId(u32 id) {
+        next_present_id = id;
+    }
+
+    /// bbport: display times reported since the last call (empty without display timing).
+    std::vector<vk::PastPresentationTimingGOOGLE> TakePastTimings();
+
     bool GetHDR() const {
         return needs_hdr;
     }
@@ -134,6 +142,7 @@ private:
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
+    u32 next_present_id = 0;   // bbport: 0 = untagged
 };
 
 } // namespace Vulkan

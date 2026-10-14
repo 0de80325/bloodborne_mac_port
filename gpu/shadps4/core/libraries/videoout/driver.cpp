@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <deque>
+#include <memory>
+#include <mutex>
 #include <cmath>
 #include <vector>
 #include <chrono>
@@ -296,6 +300,207 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
+// bbport: frame spike log (BB_FRAME_STATS=1). Each frame carries timestamps from the game's
+// submit to the display (VK_GOOGLE_display_timing); a frame that comes later than 1.25 frame
+// periods after the previous one at any stage (BB_SPIKE_MS overrides) prints a "Spike" line
+// with every stage and what the GPU process did meanwhile, so judder can be traced to a stage.
+namespace {
+
+u64 NowNs() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
+
+struct GameFlip {
+    s64 flip_arg;
+    u64 game_ns, arrival_ns;
+};
+std::mutex game_flips_mutex;
+std::deque<GameFlip> game_flips;
+
+/// Pops the game-side times of the flip with this argument (older unmatched ones are dropped).
+void TakeGameFlip(s64 flip_arg, u64* game_ns, u64* arrival_ns) {
+    std::scoped_lock lk{game_flips_mutex};
+    while (!game_flips.empty()) {
+        const GameFlip f = game_flips.front();
+        game_flips.pop_front();
+        if (f.flip_arg == flip_arg) {
+            *game_ns = f.game_ns;
+            *arrival_ns = f.arrival_ns;
+            return;
+        }
+    }
+}
+
+struct FrameTrace {
+    u32 id;
+    u64 game_ns, arrival_ns, flip_packet_ns, queued_ns, flip_ns, display_ns;
+    Vulkan::Presenter::PresentTiming present;
+    // What the GPU process did between the previous flip and this one.
+    double gpu_cpu_ms, rec_busy_ms, rec_idle_ms, ahead_ms, drain_ms, host_copies_ms,
+        compile_wait_ms;
+    u64 preempted, draws, compiles, gpu_done;
+};
+
+/// Counter deltas between flips. Counters the 5 s summary resets are re-based by Rebase().
+struct SpikeCounters {
+    enum : u32 { GpuCpu, Preempted, Draws, RecBusy, RecIdle, Ahead, Drain, HostCopies,
+                 CompileWait, Compiles, GpuDone, Count };
+    u64 last[Count]{};
+    static void Read(u64* v) {
+        v[GpuCpu] = BbStats::gpu_user_us.load() + BbStats::gpu_sys_us.load();
+        v[Preempted] = BbStats::gpu_invol_switches.load();
+        v[Draws] = BbStats::draws.load();
+        v[RecBusy] = BbStats::rec_busy_ns.load();
+        v[RecIdle] = BbStats::rec_idle_ns.load();
+        v[Ahead] = BbStats::frames_ahead_ns.load();
+        v[Drain] = BbStats::drain_ns.load();
+        v[HostCopies] = BbStats::host_copies_wait_ns.load();
+        v[CompileWait] = BbStats::compile_wait_ns.load();
+        v[Compiles] = Vulkan::g_bb_compiles.load();
+        v[GpuDone] = BbStats::gpu_done_frames.load();
+    }
+    void Fill(FrameTrace& t) {
+        u64 now[Count];
+        Read(now);
+        u64 d[Count];
+        for (u32 i = 0; i < Count; ++i) {
+            d[i] = now[i] >= last[i] ? now[i] - last[i] : now[i];
+            last[i] = now[i];
+        }
+        t.gpu_cpu_ms = d[GpuCpu] / 1e3;
+        t.rec_busy_ms = d[RecBusy] / 1e6;
+        t.rec_idle_ms = d[RecIdle] / 1e6;
+        t.ahead_ms = d[Ahead] / 1e6;
+        t.drain_ms = d[Drain] / 1e6;
+        t.host_copies_ms = d[HostCopies] / 1e6;
+        t.compile_wait_ms = d[CompileWait] / 1e6;
+        t.preempted = d[Preempted];
+        t.draws = d[Draws];
+        t.compiles = d[Compiles];
+        t.gpu_done = d[GpuDone];
+    }
+    /// After the summary exchanged its counters to zero.
+    void Rebase() {
+        Read(last);
+    }
+};
+
+std::atomic<u32> spikes_game, spikes_flip, spikes_present, spikes_display, spikes_printed,
+    frames_not_displayed;
+
+/// Runs on the presenting thread: matches display times to frames and reports late ones.
+class SpikeLog {
+public:
+    void OnPresented(const std::shared_ptr<FrameTrace>& trace) {
+        if (!display_timing) {
+            Evaluate(*trace);
+            return;
+        }
+        pending[trace->id % pending.size()] = trace;
+        for (const auto& timing : presenter->TakePastTimings()) {
+            auto& entry = pending[timing.presentID % pending.size()];
+            if (!entry || entry->id != timing.presentID) {
+                continue;
+            }
+            // MoltenVK reports Metal's presentedTime: the uptime clock, which stops while the
+            // Mac sleeps; the steady clock does not.
+#ifdef __APPLE__
+            const u64 uptime_offset = NowNs() - clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#else
+            const u64 uptime_offset = 0;
+#endif
+            entry->display_ns =
+                timing.actualPresentTime ? timing.actualPresentTime + uptime_offset : 0;
+            if (timing.actualPresentTime == 0) {
+                frames_not_displayed.fetch_add(1, std::memory_order_relaxed);
+            }
+            Evaluate(*entry);
+            entry.reset();
+        }
+    }
+
+    bool display_timing = false;
+
+private:
+    void Evaluate(const FrameTrace& t) {
+        if (!have_prev) {
+            prev = t;
+            have_prev = true;
+            return;
+        }
+        static const double limit_ms = [] {
+            if (const char* env = std::getenv("BB_SPIKE_MS"); env && std::atof(env) > 0) {
+                return std::atof(env);
+            }
+            const u32 limit = EmulatorSettings.GetFrameLimit();
+            const u32 hz = limit ? limit : EmulatorSettings.GetVblankFrequency();
+            return 1.25e3 / std::max(1u, hz);
+        }();
+        const auto gap = [](u64 a, u64 b) { return a && b ? (double(a) - double(b)) / 1e6 : 0.0; };
+        const double game = gap(t.game_ns, prev.game_ns);
+        const double flip = gap(t.flip_ns, prev.flip_ns);
+        const double present = gap(t.present.presented, prev.present.presented);
+        const double display = gap(t.display_ns, prev.display_ns);
+        const bool late_game = game > limit_ms, late_flip = flip > limit_ms,
+                   late_present = present > limit_ms, late_display = display > limit_ms;
+        spikes_game += late_game;
+        spikes_flip += late_flip;
+        spikes_present += late_present;
+        spikes_display += late_display;
+        if ((late_game || late_flip || late_present || late_display) &&
+            spikes_printed.fetch_add(1, std::memory_order_relaxed) < 20) {
+            const auto mark = [](bool late) { return late ? "!" : ""; };
+            std::printf(
+                "Spike #%u (%u frames after #%u), ms apart: game %.1f%s, flip %.1f%s, present "
+                "%.1f%s, display %.1f%s | game->host %.2f, host->flip packet %.1f, frame prep "
+                "%.1f, queued %.1f, flip->presented %.1f (acquire %.1f, submit %.1f, "
+                "vkQueuePresent %.1f), presented->display %.1f | GPU thread on CPU %.1f ms, %llu "
+                "preempted, %llu draws; recording busy %.1f idle %.1f, frames-ahead wait %.1f, "
+                "recorder waits %.1f, host copies %.1f; %llu GPU frames done; %llu compiles "
+                "(%.1f ms waited)\n",
+                t.id, t.id - prev.id, prev.id, game, mark(late_game), flip, mark(late_flip),
+                present, mark(late_present), display, mark(late_display),
+                gap(t.arrival_ns, t.game_ns), gap(t.flip_packet_ns, t.arrival_ns),
+                gap(t.queued_ns, t.flip_packet_ns), gap(t.flip_ns, t.queued_ns),
+                gap(t.present.presented, t.flip_ns), gap(t.present.acquired, t.present.start),
+                gap(t.present.submitted, t.present.acquired),
+                gap(t.present.presented, t.present.submitted),
+                gap(t.display_ns, t.present.presented), t.gpu_cpu_ms,
+                static_cast<unsigned long long>(t.preempted),
+                static_cast<unsigned long long>(t.draws), t.rec_busy_ms, t.rec_idle_ms,
+                t.ahead_ms, t.drain_ms, t.host_copies_ms,
+                static_cast<unsigned long long>(t.gpu_done),
+                static_cast<unsigned long long>(t.compiles), t.compile_wait_ms);
+        }
+        prev = t;
+    }
+
+    std::array<std::shared_ptr<FrameTrace>, 128> pending;
+    FrameTrace prev{};
+    bool have_prev = false;
+};
+
+SpikeCounters spike_counters;
+SpikeLog spike_log;
+u32 next_trace_id = 1;
+
+} // namespace
+
+void NoteGameFlip(s64 flip_arg, u32 game_us) {
+    if (!BbStats::enabled) {
+        return;
+    }
+    const u64 now = NowNs();
+    const u32 latency_us = static_cast<u32>(now / 1000) - game_us;
+    std::scoped_lock lk{game_flips_mutex};
+    game_flips.push_back({flip_arg, now - u64(latency_us) * 1000, now});
+    if (game_flips.size() > 32) {
+        game_flips.pop_front();
+    }
+}
+
 constexpr size_t FT_HISTORY_CAP = 1024;
 static std::atomic<size_t> s_ft_count{0};
 static double s_ft_history[FT_HISTORY_CAP];
@@ -338,10 +543,28 @@ void GetFrametimeStats(double* avg_fps, double* p95_ms, double* p99_ms) {
 }
 
 void VideoOutDriver::Flip(const Request& req) {
+    // bbport: frame spike log: this frame's stages so far, and what the GPU process did since
+    // the previous flip; the presenting thread adds the present and display times.
+    std::shared_ptr<FrameTrace> trace;
+    if (BbStats::enabled) {
+        trace = std::make_shared<FrameTrace>();
+        trace->id = next_trace_id++;
+        trace->game_ns = req.game_ns;
+        trace->arrival_ns = req.arrival_ns;
+        trace->flip_packet_ns = req.flip_packet_ns;
+        trace->queued_ns = req.queued_ns;
+        trace->flip_ns = NowNs();
+        spike_counters.Fill(*trace);
+        spike_log.display_timing = presenter->IsDisplayTimingSupported();
+    }
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr, trace] {
         presenter->SetHDR(hdr);
-        presenter->Present(frame);
+        presenter->Present(frame, false, true, trace ? trace->id : 0);
+        if (trace) {
+            trace->present = presenter->LastPresentTiming();
+            spike_log.OnPresented(trace);
+        }
     });
 
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
@@ -568,6 +791,16 @@ void VideoOutDriver::Flip(const Request& req) {
                             median, std::sqrt(std::max(0.0, sq / intervals.size() - mean * mean)),
                             sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
             }
+            if (BbStats::enabled) {
+                const u32 shown = spikes_printed.exchange(0);
+                std::printf("Spikes (frames later than 1.25 periods): game %u, flip %u, present "
+                            "%u, display %u%s; %u frames never displayed\n",
+                            spikes_game.exchange(0), spikes_flip.exchange(0),
+                            spikes_present.exchange(0), spikes_display.exchange(0),
+                            shown > 20 ? " (first 20 printed)" : "",
+                            frames_not_displayed.exchange(0));
+                spike_counters.Rebase();
+            }
             intervals.clear();
             window_start = now;
             frames = 0;
@@ -681,6 +914,7 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 }
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    const u64 flip_packet_ns = BbStats::enabled ? NowNs() : 0;
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
@@ -693,13 +927,19 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
 
     {
         std::scoped_lock lock{mutex};
-        requests.push({
+        Request request{
             .frame = frame,
             .port = port,
             .flip_arg = flip_arg,
             .index = index,
             .eop = is_eop,
-        });
+        };
+        if (BbStats::enabled) {
+            TakeGameFlip(flip_arg, &request.game_ns, &request.arrival_ns);
+            request.flip_packet_ns = flip_packet_ns;
+            request.queued_ns = NowNs();
+        }
+        requests.push(request);
     }
     request_cv.notify_one();
 }

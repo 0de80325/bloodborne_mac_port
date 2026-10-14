@@ -17,7 +17,10 @@
 #include <time.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <utility>
 #include <vector>
 #include <mach/mach_vm.h>
 #include <boost/preprocessor/stringize.hpp>
@@ -860,6 +863,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    bool type0_seen = false; // bbport: reported once per command buffer
     while (!dcb.empty()) {
         ProcessCommands();
 
@@ -871,11 +875,32 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
             break;
-        case 0:
-            DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
-            UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
-                            header->type0.base.Value(), header->type0.NumWords());
-            break;
+        case 0: {
+            // bbport: a type-0 packet writes NumWords registers from base. The CP processes
+            // them, so a zero-filled tail (header 0: one write to register 0) is harmless on
+            // hardware. The game rarely submits a DCB whose tail was never written (all zeros,
+            // seen after a compute shader setup while loading a save): skip, don't abort.
+            static std::atomic<u32> type0_reports{0};
+            const u32 words = std::min<u32>(1 + header->type0.NumWords(), dcb.size());
+            if (!std::exchange(type0_seen, true) &&
+                type0_reports.fetch_add(1, std::memory_order_relaxed) < 3) {
+                const size_t zeros = std::find_if(dcb.begin(), dcb.end(),
+                                                  [](u32 w) { return w != 0; }) - dcb.begin();
+                std::fprintf(stderr,
+                             "GPU: PM4 type-0 packet (base reg %#x, %u words) at offset %#llx of "
+                             "a command buffer, %zu bytes left (%zu zero words follow): "
+                             "skipped as register writes\n",
+                             header->type0.base.Value(), header->type0.NumWords(),
+                             static_cast<unsigned long long>(
+                                 reinterpret_cast<uintptr_t>(dcb.data()) - base_addr),
+                             dcb.size_bytes(), zeros);
+                if (header->raw != 0) {
+                    DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
+                }
+            }
+            dcb = NextPacket(dcb, words);
+            continue;
+        }
         case 2:
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);

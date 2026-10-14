@@ -128,7 +128,12 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present() {
+    const vk::PresentTimeGOOGLE present_time{.presentID = next_present_id};
+    const vk::PresentTimesInfoGOOGLE present_times{.swapchainCount = 1, .pTimes = &present_time};
+    const bool tagged = next_present_id != 0 && instance.IsDisplayTimingSupported();
+    next_present_id = 0;
     const vk::PresentInfoKHR present_info = {
+        .pNext = tagged ? &present_times : nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -147,6 +152,26 @@ bool Swapchain::Present() {
     frame_index = (frame_index + 1) % image_count;
 
     return !needs_recreation;
+}
+
+std::vector<vk::PastPresentationTimingGOOGLE> Swapchain::TakePastTimings() {
+    std::vector<vk::PastPresentationTimingGOOGLE> timings;
+    if (!instance.IsDisplayTimingSupported() || !swapchain) {
+        return timings;
+    }
+    const vk::Device device = instance.GetDevice();
+    u32 count = 0;
+    if (device.getPastPresentationTimingGOOGLE(swapchain, &count, nullptr) != vk::Result::eSuccess ||
+        count == 0) {
+        return timings;
+    }
+    timings.resize(count);
+    if (device.getPastPresentationTimingGOOGLE(swapchain, &count, timings.data()) ==
+        vk::Result::eIncomplete) {
+        // More arrived in between; the rest comes with the next call.
+    }
+    timings.resize(count);
+    return timings;
 }
 
 void Swapchain::FindPresentFormat() {

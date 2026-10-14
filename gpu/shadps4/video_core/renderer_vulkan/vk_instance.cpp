@@ -257,6 +257,10 @@ bool Instance::CreateDevice() {
     // bbport: required on portability (MoltenVK) devices.
     add_extension("VK_KHR_portability_subset");
     metal_objects = add_extension(VK_EXT_METAL_OBJECTS_EXTENSION_NAME); // MetalFX
+    // Frame spike log (BB_FRAME_STATS=1): when each frame actually reached the display.
+    if (const char* stats = std::getenv("BB_FRAME_STATS"); stats && stats[0] == '1') {
+        display_timing = add_extension(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
+    }
 #endif
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),
                "Required Vulkan extension unavailable: {}", VK_KHR_SWAPCHAIN_EXTENSION_NAME);

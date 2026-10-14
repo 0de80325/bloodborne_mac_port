@@ -99,7 +99,23 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
-    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    /// present_id (bbport, frame spike log): tags the present for VK_GOOGLE_display_timing.
+    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true,
+                 u32 present_id = 0);
+
+    /// bbport: frame spike log: steady-clock ns at the stages of the last Present().
+    struct PresentTiming {
+        u64 start, acquired, submitted, presented;
+    };
+    const PresentTiming& LastPresentTiming() const {
+        return last_present;
+    }
+    bool IsDisplayTimingSupported() const {
+        return instance.IsDisplayTimingSupported();
+    }
+    std::vector<vk::PastPresentationTimingGOOGLE> TakePastTimings() {
+        return swapchain.TakePastTimings();
+    }
     Frame* PrepareLastFrame();
 
 private:
@@ -133,6 +149,7 @@ private:
     std::vector<Frame> present_frames;
     std::queue<Frame*> free_queue;
     Frame* last_submit_frame;
+    PresentTiming last_present{};
     std::mutex free_mutex;
     std::condition_variable free_cv;
     std::condition_variable_any frame_cv;

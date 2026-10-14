@@ -95,7 +95,8 @@ typedef struct {
     BbGpuRecord r;
     uint32_t count;
     uint32_t has_ccb_addrs, has_ccb_sizes;
-    uint32_t copied, pad; /* copied: dcb/ccb are byte offsets into the arena, not guest addresses */
+    uint32_t copied;  /* dcb/ccb are byte offsets into the arena, not guest addresses */
+    uint32_t game_us; /* the game's steady clock at the submit, microseconds mod 2^32 (spike log) */
     uint32_t vo_handle, buf_idx, flip_mode; /* SUBMIT_GFX_FLIP */
     int64_t flip_arg;
     uint64_t dcb[BBGPU_SUBMIT_MAX], ccb[BBGPU_SUBMIT_MAX];

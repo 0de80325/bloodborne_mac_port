@@ -45,6 +45,15 @@ Each item: what was done for now, what the refinement is, and where it lives.
   off), and the host records each arena copy's sequence number and hash on arrival, so the next
   "Bad PM4 packet" says whether its copy changed after it arrived (arena reused mid-parse) or
   was already bad at submit. Next occurrence: read those two lines first.
+  *2026-10-14, caught at submit (load into the level from the title):* the game submitted a
+  506-word DCB with only 58 words written; the rest were zeros (still zeros 50 ms later, so no
+  writer was racing the submit). The last packets were a correct 25-word
+  `sceGnmSetCsShader` (from another thread than the submit); the arena copy was unchanged.
+  **Now:** the CP skips type-0 packets as register writes, as the hardware does (a zero tail is
+  one write to register 0 per two words), and logs once per buffer ("PM4 type-0 packet …
+  skipped"); tested with an injected 448-word zero tail. *Remaining:* why the game leaves the
+  tail unwritten (the "Gnm check" now also prints where the writing thread's next library calls
+  went: another buffer = a chunk switch the size does not reflect).
 - **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
   host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
   the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
@@ -54,6 +63,20 @@ Each item: what was done for now, what the refinement is, and where it lives.
   steady 60/61 FPS. Automated runs standing in the city show a worst frame of 20–25 ms in every
   5 s window (median 16.67, p99 17–22 ms) with zero shader compiles; the title screen has none.
   Find what those frames wait on (present timing, a periodic CPU job, host-copy waits).
+  *2026-10-14, frame spike log* (`BB_FRAME_STATS=1`, "Spike #…" lines, FINDINGS): in 2 min of
+  walking (user settings, 1080p MetalFX Native AA) **9 frames reached the display a vsync late**
+  (33.3 ms) and **30 game frames took 21–46 ms** while the display stayed at 16.7 ms. With the
+  delta-time patch a long game frame moves the world further in one step, so motion judders
+  at a steady 60. Two causes seen: GPU hiccups (one GPU frame ~50 ms: frames-ahead wait 34–36 ms,
+  then the game waits too) and runs of 4–5 frames where the recording thread is busy 20–25 ms
+  (normal ~15) with the same draw count. *Next:* what the GPU does in the 50 ms frames (Metal
+  System Trace at the spike), and why recording slows (MoltenVK encoding, CPU contention).
+- **Display latency 34–76 ms (mean 51) from `vkQueuePresent` to the screen** (2026-10-14,
+  VK_GOOGLE_display_timing). Two to four vsyncs of queued drawables: input lag. Try fewer
+  swapchain images / `maximumDrawableCount` 2 and measure judder and FPS with it.
+- **Frame timeline counters on M1–M3** (`rec_busy_ns`, `frames_ahead_ns`, … in BbStats) add
+  `CpuCycles()` deltas and print them as ns: right on the M4 (1 GHz counter), 41.7x too small
+  on 24 MHz Macs. Convert with the counter frequency.
 - **Fixed 2026-10-13: pipelines Metal rejected after a cached session** ("cannot reserve
   'buffer' resource location"): shader permutation indices reused across sessions. *Remaining:*
   one pixel shader (`fs_fbe7c4b6`) has two cached permutations that compare equal ("conflicts

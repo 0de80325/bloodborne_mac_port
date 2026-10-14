@@ -141,6 +141,10 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 // Internal system functions
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk);
 
+/// bbport (host, frame spike log): a submit-and-flip record from the game arrived; game_us is
+/// the game's steady clock at the submit (microseconds mod 2^32).
+void NoteGameFlip(s64 flip_arg, u32 game_us);
+
 void RegisterLib(Core::Loader::SymbolsResolver* sym);
 
 } // namespace Libraries::VideoOut

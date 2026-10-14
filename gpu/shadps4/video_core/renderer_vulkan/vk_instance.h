@@ -199,6 +199,11 @@ public:
         return metal_objects;
     }
 
+    /// bbport: VK_GOOGLE_display_timing, enabled only for the frame spike log (BB_FRAME_STATS).
+    bool IsDisplayTimingSupported() const {
+        return display_timing;
+    }
+
     /// bbport: false on MoltenVK; null bindings then need dummy resources.
     bool IsNullDescriptorSupported() const {
         return null_descriptor;
@@ -569,6 +574,7 @@ private:
     bool robust_buffer_access2{};
     bool null_descriptor{};
     bool metal_objects{};
+    bool display_timing{};
     bool provoking_vertex{};
     bool shader_stencil_export{};
     bool image_load_store_lod{};

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <pthread.h>
 #include <tuple>
@@ -218,6 +219,30 @@ void CheckCommandBuffer(const char* kind, const u32* buffer, u32 bytes) {
                          (unsigned long long)call.seq);
         }
     }
+    // Where the thread that wrote last before the bad word went next (a buffer switch?).
+    const GnmCall* last = nullptr;
+    for (const GnmCall& call : hits) {
+        if (s64(call.cmdbuf - base) / 4 < bad && (!last || call.seq > last->seq)) {
+            last = &call;
+        }
+    }
+    if (last) {
+        u32 shown = 0;
+        for (u64 seq = last->seq + 1; seq < newest && shown < 6; ++seq) {
+            const GnmCall& call = gnm_calls[seq % GnmCallRing];
+            if (call.seq != seq || call.thread != last->thread) {
+                continue;
+            }
+            std::fprintf(stderr, "    then on that thread: %s(size %llu) at %#llx (%s) -> %lld, "
+                                 "call %llu\n",
+                         call.name, (unsigned long long)call.size,
+                         (unsigned long long)call.cmdbuf,
+                         call.cmdbuf >= base && call.cmdbuf < base + bytes ? "this buffer"
+                                                                           : "another buffer",
+                         (long long)call.result, (unsigned long long)call.seq);
+            ++shown;
+        }
+    }
     std::fflush(stderr);
 }
 } // namespace
@@ -344,6 +369,10 @@ static s32 RemoteSubmit(u32 count, const u32* dcb_gpu_addrs[], const u32* dcb_si
             record.buf_idx = flip->buf_idx;
             record.flip_mode = flip->flip_mode;
             record.flip_arg = flip->flip_arg;
+            record.game_us = static_cast<u32>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
         }
         for (u32 i = 0; i < n; ++i) {
             record.dcb[i] = reinterpret_cast<u64>(dcb_gpu_addrs[done + i]);
@@ -3682,6 +3711,9 @@ bool BbSplitHost(const BbGpuRecord* r) {
                 dcb[i] = reinterpret_cast<u32*>(s.dcb[i]);
                 ccb[i] = reinterpret_cast<u32*>(s.ccb[i]);
             }
+        }
+        if (r->type == BBGPU_REC_SUBMIT_GFX_FLIP) {
+            Libraries::VideoOut::NoteGameFlip(s.flip_arg, s.game_us);
         }
         u32** ccb_addrs = s.has_ccb_addrs ? ccb : nullptr;
         u32* ccb_sizes = s.has_ccb_sizes ? s.ccb_bytes : nullptr;
