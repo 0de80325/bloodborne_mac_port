@@ -118,6 +118,12 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *2026-10-14, later:* game-side GPU page faults ruled out (spike lines now show them: ~1–3 per
   frame, ~0.1 ms). In the Hunter's Dream gameplay has 0–3 long game frames per 5 s; most
   "game" spikes in a run are title/loading screens at 30 FPS. Re-measure in Central Yharnam.
+  *2026-10-15: largely fixed.* Late game frames were the game waiting ~13 ms behind MoltenVK's
+  encoding inside the flip's `vkQueueSubmit` (all game threads use ~12 ms of CPU in a 30 ms
+  frame). Prefilled Metal command buffers (default unless MetalFX) cut late game frames ~6x
+  (4–5 per 5 s → 0.6–0.8). *Remaining:* MetalFX keeps encode-at-submit (its command buffer
+  queues behind a prefilled one); encode MetalFX into the frame's own Metal command buffer, or
+  order it with an event, to give MetalFX the same gain. Re-measure in Central Yharnam.
 - **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
   stopped, the window stayed off screen at its old size while the game kept running). The
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue

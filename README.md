@@ -77,16 +77,20 @@ geometry corruption at 1440p (scenes above 1080p now use live resolution changes
   missing-geometry reports below.
 - **Shader compile mode `balanced`** is the default: new shaders compile in the background
   and a frame waits at most 6 ms for them, so new areas no longer freeze for 100+ ms.
+- **Less judder:** late game frames (the cause of judder at a steady 60) dropped about 6x with
+  the upscaler off or FSR: MoltenVK now encodes each frame's Metal commands while they are
+  recorded instead of all at once at the flip, which the game was waiting behind.
 - **Diagnostics:** `BB_FRAME_STATS=1` prints per-stage timings of every late frame ("Spike"
-  lines), and corrupted GPU command streams are reported with the game threads and code
-  involved.
+  lines, with each game thread's CPU time), and corrupted GPU command streams are reported
+  with the game threads and code involved.
 
 ### Known issues
 
 - **Missing geometry after a respawn or reload** (character's legs, a flight of stairs, a
   floor), reported on an M4 Max and an M2 Pro; a relaunch brings it back. It coincided with the
   load race below, now fixed, so it may be gone: reports welcome.
-- **Occasional judder at a steady 60 FPS** (some game frames take 20–45 ms).
+- **Occasional judder at a steady 60 FPS** (some game frames take 20–45 ms): much rarer since
+  2026-10-15 (about 6x fewer late frames), except with the MetalFX upscaler.
 
 ### What's next
 
