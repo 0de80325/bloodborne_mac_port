@@ -64,6 +64,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   case: timed waits are trylock+backoff on macOS). **Now:** an invalid packet type skips the
   rest of that command buffer (logged) instead of stopping the game. *Next:* reproduce with a
   warm cache (`loadloop.sh` without the scratch cache) and trace the cloth threads' locks.
+  *Third load, same session (skipped, the game played on):* the clearest record yet. The
+  render thread wrote `sceGnmSetPsShader` (40 words) at word 153 of a DCB; the cloth thread then
+  wrote `sceGnmSetCsShader` (25 words) at word **159**, inside the shader's words (its header
+  replaced the PS RSRC values, leaving `70d1b005` = COMPUTE_PGM_LO as a header), and a second
+  one at word 337 of the same buffer. Two threads were handed overlapping command-buffer space:
+  look at how the game hands out command-buffer chunks to the cloth jobs (its "reserve failed"
+  callback / chunk allocator) and which of our primitives guard it.
 - **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
   host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
   the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
