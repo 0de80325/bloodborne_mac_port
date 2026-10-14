@@ -565,8 +565,11 @@ int main(int argc, char **argv) {
     pthread_attr_setstacksize(&attr, 64u << 20); /* the main thread's stack is 8 MiB; be generous */
     if (pthread_create(&thread, &attr, game_thread, NULL)) { perror("pthread_create"); return 1; }
     pthread_attr_destroy(&attr);
-    CFRunLoopRun();
-    return 0;
+    /* SDL stops the main run loop at times (entering full screen): run it again. */
+    for (;;) {
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0e10, false) == kCFRunLoopRunFinished)
+            usleep(1000); /* no sources yet */
+    }
 }
 static int probe_main(int argc, char **argv) {
 #else

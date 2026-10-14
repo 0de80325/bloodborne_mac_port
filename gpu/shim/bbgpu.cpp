@@ -12,6 +12,7 @@
 #include "video_core/renderdoc.h"
 #include <cstring>
 #include <unistd.h>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include <SDL3/SDL.h>
 #ifdef __APPLE__
 #include <dispatch/dispatch.h>
+#include <CoreFoundation/CoreFoundation.h>
 #endif
 #include "../bbgpu.h"
 #include "bbport_split.h"
@@ -384,9 +386,18 @@ extern "C" int bbgpu_init_remote(const BbGpuConfig* config, void* shared_block) 
     return 0;
 }
 
+#ifdef __APPLE__
+static s32 g_window_width, g_window_height;
+#endif
+
 static void OpenWindow(const BbGpuConfig* config) {
     const std::string title = config->title ? config->title : "Bloodborne";
     const s32 width = config->width, height = config->height;
+#ifdef __APPLE__
+    g_window_width = width;
+    g_window_height = height;
+#endif
+#ifndef __APPLE__
     auto window_loop = [title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
@@ -403,12 +414,37 @@ static void OpenWindow(const BbGpuConfig* config) {
         std::fflush(stdout);
         std::_Exit(0);
     };
+#endif
 #ifdef __APPLE__
     // Cocoa only works on the main thread: bb-probe runs the game on another thread and runs
-    // the main run loop on the main thread, so the window and its event loop go to the main queue.
-    using Loop = decltype(window_loop);
-    dispatch_async_f(dispatch_get_main_queue(), new Loop(std::move(window_loop)),
-                     [](void* loop) { (*static_cast<Loop*>(loop))(); });
+    // the main run loop on the main thread, so the window goes to the main queue. Its events
+    // are polled from a 2 ms run loop timer there, not a loop that never returns: AppKit finishes some
+    // work (the full-screen transition) in blocks of its own on the main queue, which a
+    // never-ending block starves (the window stuck off screen at its old size).
+    dispatch_async_f(dispatch_get_main_queue(), new std::string(title), [](void* ctx) {
+        const std::unique_ptr<std::string> title{static_cast<std::string*>(ctx)};
+        auto* window = new Frontend::WindowSDL(g_window_width, g_window_height, title->c_str());
+        {
+            std::scoped_lock lock{g_window_mutex};
+            g_window = window;
+            g_window_ready = true;
+        }
+        g_window_cv.notify_all();
+        // A run loop timer (unlike a dispatch timer) is a source of the main run loop: it keeps
+        // CFRunLoopRun() running, and in the common modes it also fires during live resizes.
+        CFRunLoopTimerContext context{0, window, nullptr, nullptr, nullptr};
+        CFRunLoopTimerRef timer = CFRunLoopTimerCreate(
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent(), 0.002, 0, 0,
+            [](CFRunLoopTimerRef, void* ctx) {
+                if (!static_cast<Frontend::WindowSDL*>(ctx)->PollEvents()) {
+                    LOG_INFO(Frontend, "Window closed by user");
+                    std::fflush(stdout);
+                    std::_Exit(0);
+                }
+            },
+            &context);
+        CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
+    });
 #else
     g_window_thread = std::thread(std::move(window_loop));
     g_window_thread.detach();

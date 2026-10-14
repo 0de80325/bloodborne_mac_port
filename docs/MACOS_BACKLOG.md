@@ -54,6 +54,16 @@ Each item: what was done for now, what the refinement is, and where it lives.
   skipped"); tested with an injected 448-word zero tail. *Remaining:* why the game leaves the
   tail unwritten (the "Gnm check" now also prints where the writing thread's next library calls
   went: another buffer = a chunk switch the size does not reflect).
+  *2026-10-14 later, 2 of 3 user loads with a warm cache* (the 62-load hunt used a cold one): a
+  second form, a type-1 word (`704fcf00 704f3f00 704fcf00 000478ff 00008fff`, no header) after
+  four `SET_CONTEXT_REG`s, 25 words after a `sceGnmSetCsShader` whose thread wrote its next
+  `sceGnmSetCsShader` 65 words later in the same buffer. Both forms appear right after the
+  game starts its `CSClothThread0..5` (cloth compute, built on other threads than the submit).
+  The hardware would hang on type 1, so the game cannot do this on a PS4: suspect our HLE lets
+  two game threads write one command buffer (a lock or semaphore that is not exclusive in some
+  case: timed waits are trylock+backoff on macOS). **Now:** an invalid packet type skips the
+  rest of that command buffer (logged) instead of stopping the game. *Next:* reproduce with a
+  warm cache (`loadloop.sh` without the scratch cache) and trace the cloth threads' locks.
 - **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
   host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
   the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
@@ -71,6 +81,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   then the game waits too) and runs of 4–5 frames where the recording thread is busy 20–25 ms
   (normal ~15) with the same draw count. *Next:* what the GPU does in the 50 ms frames (Metal
   System Trace at the spike), and why recording slows (MoltenVK encoding, CPU contention).
+- **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
+  stopped, the window stayed off screen at its old size while the game kept running). The
+  window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue
+  work for the transition. Events are now polled from a 2 ms run loop timer (common modes), and
+  the host and bb-probe restart the main run loop when SDL stops it (it does on entering full
+  screen; before, the process then exited). *Remaining:* `contents scale 1.0`: the swapchain is
+  at point size, not Retina pixels (full screen at 1496x938 on this display).
 - **Display latency 34–76 ms (mean 51) from `vkQueuePresent` to the screen** (2026-10-14,
   VK_GOOGLE_display_timing). Two to four vsyncs of queued drawables: input lag. Try fewer
   swapchain images / `maximumDrawableCount` 2 and measure judder and FPS with it.

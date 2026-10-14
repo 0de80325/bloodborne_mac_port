@@ -871,10 +871,23 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         const u32 type = header->type;
 
         switch (type) {
-        default:
-            DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
-            UNREACHABLE_MSG("Wrong PM4 type {}", type);
-            break;
+        default: {
+            // bbport: type 1 does not exist: the game submitted a broken buffer (rare, while
+            // loading into a level; MACOS_BACKLOG). The hardware would hang; skip the rest of
+            // this buffer instead of stopping the game (a glitched frame at worst).
+            static std::atomic<u32> bad_reports{0};
+            if (bad_reports.fetch_add(1, std::memory_order_relaxed) < 3) {
+                DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
+            }
+            std::fprintf(stderr, "GPU: PM4 type-%u packet %#010x at offset %#llx: rest of the "
+                                 "command buffer (%zu bytes) skipped\n",
+                         type, header->raw,
+                         static_cast<unsigned long long>(
+                             reinterpret_cast<uintptr_t>(dcb.data()) - base_addr),
+                         dcb.size_bytes());
+            dcb = dcb.last(0);
+            continue;
+        }
         case 0: {
             // bbport: a type-0 packet writes NumWords registers from base. The CP processes
             // them, so a zero-filled tail (header 0: one write to register 0) is harmless on

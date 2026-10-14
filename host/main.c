@@ -376,7 +376,10 @@ int main(void) {
     send_ready(status);
     if (status) { say("setup failed; exiting"); return 1; }
     say("ready: serving the submit ring");
-    CFRunLoopRun(); /* Cocoa: the renderer's window and its event loop run on the main thread */
-    say("main run loop returned; exiting");
-    return 0;
+    /* Cocoa: the renderer's window and its event loop run on the main thread. SDL stops the
+     * main run loop at times (entering full screen): run it again; the window closing exits. */
+    for (;;) {
+        if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0e10, false) == kCFRunLoopRunFinished)
+            usleep(1000); /* no sources yet */
+    }
 }
