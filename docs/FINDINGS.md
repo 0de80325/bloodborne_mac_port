@@ -491,6 +491,26 @@ thread A, then B" (owned contexts only) shows overlaps even when the packets sta
 `BB_SYNC_TRACE=1` merges lock calls into the report; guest threads log their host thread id
 and `scePthreadSelf` handle.
 
+### Load race fixed: one lock around both context users (2026-10-14 night)
+
+Option B (`src/runtime_hooks.c`): the main thread's setup step (`0xebb960`) and the render
+thread's frame job (`0x2199af0`, which holds every render-thread chain seen in the overlaps)
+are hooked at their entries. Their first instructions (checked byte for byte, all
+position-independent) move to a stub; the entry becomes an absolute jump to a common hook that
+saves the argument registers, takes one lock, calls the stub and releases the lock. A wait
+gives up after 100 ms and runs the function anyway, with a log line, so a hidden dependency
+cannot hang the game. Neither function takes stack arguments, so the hook's extra return
+address moves none.
+
+- 10 walk runs with 16 busy processes (9 loaded the level; one stayed at the title, the
+  scripted presses came too early): **0 corrupted buffers, 0 host losses, 0 timeouts.** In 5
+  of the 9 loads the main thread's step waited 0.3–0.7 ms for the render thread's frame — the
+  overlap that corrupted packets in 6 of 9 runs before. Every remaining "Gnm: context X used
+  by thread A, then B" line is the main thread starting 0.1–0.4 ms after the render thread's
+  frame ended, i.e. serialized.
+- Cost: one uncontended mutex per render-thread frame; the main thread's step runs only during
+  loads.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25

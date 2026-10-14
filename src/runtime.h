@@ -90,6 +90,9 @@ int32_t runtime_guest_errno(int host_errno);
 int runtime_memory_reserve_space(void);
 void *runtime_low_map(size_t size, int prot);
 void *runtime_low_alloc(size_t size);
+/* runtime_hooks.c: one lock around the engine paths that share the immediate GX context. */
+void runtime_install_context_lock(unsigned char *image, uint64_t image_size);
+void runtime_context_lock_stats(void);
 void *runtime_low_malloc(size_t size);
 void *runtime_low_calloc(size_t nmemb, size_t size);
 void *runtime_low_alloc_aligned(size_t size, size_t align);
