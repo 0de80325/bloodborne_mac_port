@@ -136,7 +136,8 @@ Each item: what was done for now, what the refinement is, and where it lives.
   per 5 s (vs 3.9–4.8 without prefill) and +16 ms latency, so no. *Next idea:* with MetalFX,
   record the presenter's swapchain work in a command buffer that is not prefilled (MoltenVK
   decides per command buffer? check `VkCommandBufferUsageFlags`/one-time-submit handling), or
-  make the presenter frame pool deeper than the drawable count.
+  make the presenter frame pool deeper than the drawable count. *Tried:* presenter command
+  buffers begun without ONE_TIME_SUBMIT: 46 late frames per 5 s, no help.
 - **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
   stopped, the window stayed off screen at its old size while the game kept running). The
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue

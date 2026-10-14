@@ -547,6 +547,10 @@ frame's prefilled command buffer. So prefill is on by default except when the up
 start is MetalFX (`gpu/shim/bbgpu.cpp`; the environment variable overrides). Switching to MetalFX
 in the menu keeps prefill until the next start.
 
+10-minute soak with prefill (upscaler off, walk then standing in the Hunter's Dream): 0.2 late
+game frames per 5 s over 120 windows, GPU host memory flat at 2,570 MB for 8 minutes, no
+crash.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25
