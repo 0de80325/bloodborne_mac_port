@@ -5,12 +5,12 @@
 #
 # Settings live in launch.conf next to this file (not committed), as shell assignments:
 #   BB_GAME_DIR=/path/to/CUSA03173   the game folder (asked for on first launch)
-#   BB_DATA_DIR=/path/to/data        saves, shader caches and bbport.ini (default: this folder)
+#   BB_DATA_DIR=/path/to/data        saves, shader caches and bbport.ini
+#                                    (default: ~/Library/Application Support/Bloodborne)
 # Any other run.sh variable (BB_FPS, BB_CONFIG, ...) can be set there too.
 set -uo pipefail
 cd -- "$(dirname -- "$0")" || exit 1
-repo=$PWD
-conf=$repo/launch.conf
+conf=$PWD/launch.conf
 
 finish() {
     echo
@@ -56,7 +56,7 @@ export BB_GAME_DIR
 [[ -n ${BB_DATA_DIR:-} ]] && export BB_DATA_DIR
 
 echo "Game:  $BB_GAME_DIR"
-echo "Data:  ${BB_DATA_DIR:-$repo}"
+echo "Data:  ${BB_DATA_DIR:-$HOME/Library/Application Support/Bloodborne}"
 echo
 bash run.sh "$@"
 status=$?

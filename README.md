@@ -173,25 +173,34 @@ starts the game.
   `chmod +x Bloodborne.command` once.
 
 `launch.conf` holds shell assignments and is not committed. Besides the game folder it can set
-where saves, shader caches and settings live (default: the repository folder), and any other
-`run.sh` variable:
+any other `run.sh` variable, such as `BB_DATA_DIR` (below):
 
 ```sh
 BB_GAME_DIR=/Users/you/Bloodborne/CUSA03173
-BB_DATA_DIR=/Users/you/Developer/GitHub/bloodborne_mac_port/out/macdata
 ```
+
+### Saves and settings
+
+Saves, settings (`bbport.ini`) and shader caches live in
+**`~/Library/Application Support/Bloodborne`**. The **`Saves`** shortcut in the repository folder
+opens the save folder in Finder; your character is in `1/CUSA00207/SPRJ0005/` (the PS4's own
+save layout, so saves can be copied to and from the Linux and Windows ports). Quit the game
+before copying saves.
+
+To keep them elsewhere, set `BB_DATA_DIR=/some/folder` in `launch.conf` (or the environment).
+A checkout that already has saves in its own folder (`user/`, from before this default) keeps
+using them; move `user/` and `bbport.ini` to the folder above to switch.
 
 ### From Terminal
 
 ```sh
 cd bloodborne_mac_port
 BB_GAME_DIR=/path/to/CUSA03173 bash run.sh
-# optional: BB_DATA_DIR=/path/to/data for saves, caches and bbport.ini elsewhere
 ```
 
 `run.sh` prepares the game image, rebuilds anything whose sources changed, and points the
-Vulkan loader at the bundled MoltenVK. Saves and shader caches go to `user/` under the data
-folder, settings to `bbport.ini` there.
+Vulkan loader at the bundled MoltenVK. It uses the same saves and settings as the Finder
+launcher.
 
 ### In the game
 
@@ -213,6 +222,7 @@ folder, settings to `bbport.ini` there.
 | `scripts/` | Eboot preparation, linking, patch compiler (`patches.py`); `scripts/macos/` dependency bootstrap |
 | `patches/` | Community XML patches for Bloodborne 1.09 |
 | `Bloodborne.command` | Finder launcher (runs `run.sh` in Terminal) |
+| `Saves` | Shortcut to the save folder (created on first launch, not committed) |
 | `launcher/` | GTK launcher from the Linux port (Linux reference path) |
 | `tools/` | Developer utilities, including `pkg_extract` (fpkg unpacker) |
 | `docs/` | macOS plan and backlog, plus technical notes inherited from upstream |

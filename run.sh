@@ -14,12 +14,26 @@ fi
 # BB_PREBUILT=1 (packaged builds, the AppImage): out/bb-probe and its GPU library are installed
 # next to this script; nothing is built and no nix-shell is needed.
 # BB_DATA_DIR: writable directory for the generated files (out/), saves (user/) and bbport.ini;
-# by default this directory.
+# by default this directory (macOS: ~/Library/Application Support/Bloodborne).
 data=${BB_DATA_DIR:-.}
 # macOS: the x86-64 build runs under Rosetta 2 on MoltenVK from deps/ (scripts/macos/bootstrap_deps.sh).
 macos=0
 if [[ $(uname -s) == Darwin ]]; then
     macos=1
+    # Data defaults to ~/Library/Application Support/Bloodborne. A checkout that already keeps
+    # saves in this directory goes on using them (moving saves is left to the player).
+    if [[ -z ${BB_DATA_DIR:-} ]]; then
+        data="$HOME/Library/Application Support/Bloodborne"
+        if [[ ! -d $data && ( -d user/savedata || -f bbport.ini ) ]]; then
+            data=.
+            echo "Saves and settings stay in $PWD (move user/ and bbport.ini to $HOME/Library/Application Support/Bloodborne to use the default)."
+        fi
+        # A "Saves" link next to this script leads to the save folder from Finder.
+        if [[ $data != . ]]; then
+            mkdir -p "$data/user/savedata"
+            [[ -e Saves || -L Saves ]] || ln -s "$data/user/savedata" Saves 2>/dev/null || true
+        fi
+    fi
     icd=$PWD/deps/x86_64/share/vulkan/icd.d/MoltenVK_icd.json
     if [[ -z ${VK_DRIVER_FILES:-} && -f $icd ]]; then export VK_DRIVER_FILES=$icd; fi
 fi
