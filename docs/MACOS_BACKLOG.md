@@ -136,6 +136,12 @@ Each item: what was done for now, what the refinement is, and where it lives.
   stages skipped by MoltenVK) or stale buffer-cache/arena contents for re-used guest memory
   after the reload (macOS arena has no sparse unbind). Also: the ghosting halo in character
   creation (Mac GUI/visual list above).
+  *2026-10-14, more reports:* legs missing after a spawn (user, M4 Max); legs missing after
+  dying and respawning (another user, M2 Pro, reproducible for them); a flight of stairs
+  missing in the user's session, present after a relaunch. Predates the `balanced` shader
+  mode, so not draws skipped while compiling. *Next:* scripted die/respawn or reload cycles
+  with screenshots; at a hit, compare the host's copy of the missing draw's vertex/index data
+  with the game's memory (stale mirror or buffer cache vs. a rejected pipeline).
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.
