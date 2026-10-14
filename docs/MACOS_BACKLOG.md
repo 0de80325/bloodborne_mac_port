@@ -127,8 +127,16 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *Tried 2026-10-15:* encoding MetalFX right after the submit, before the next command buffer
   begins: no change (~38 late frames per 5 s with prefill). The spikes alternate: one frame
   spends ~22 ms in "frame prep" (the upscaler step on the GPU thread), the next is a late game
-  frame; the presenter's submit takes exactly one vsync (16.7 ms). Profile where the upscaler
-  step blocks (a `sample` of bbgpu-host during a MetalFX + prefill run) before trying more.
+  frame; the presenter's submit takes exactly one vsync (16.7 ms). *Profiled (sample of
+  bbgpu-host, MetalFX + prefill):* `bb:DrawRec` spends ~58% of its time in
+  `Presenter::PrepareFrame` → `GetRenderFrame` → `vkWaitForFences` (no free presenter frame),
+  because `bb:Present` sits in `CAMetalLayer nextDrawable`: with prefill, MoltenVK takes the
+  drawable when the swapchain image is first used in recording (`vkCmdClearColorImage` in
+  `Presenter::Present`), and both drawables are in flight. Three drawables: 10.9 late frames
+  per 5 s (vs 3.9–4.8 without prefill) and +16 ms latency, so no. *Next idea:* with MetalFX,
+  record the presenter's swapchain work in a command buffer that is not prefilled (MoltenVK
+  decides per command buffer? check `VkCommandBufferUsageFlags`/one-time-submit handling), or
+  make the presenter frame pool deeper than the drawable count.
 - **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
   stopped, the window stayed off screen at its old size while the game kept running). The
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue
