@@ -481,6 +481,29 @@ Walk in Central Yharnam, the user's settings (1080p, MetalFX Native AA), 24 wind
   the present's submission blocked behind it (8–23 ms).
 - Display latency, `vkQueuePresent` to the screen: 34–76 ms, mean 51 (2–4 vsyncs).
 
+### Display latency: two drawables, and what sets present-to-screen time (2026-10-14)
+
+Walks in the Hunter's Dream (user settings, 1080p, upscaler off), `BB_FRAME_STATS=1`; the 5 s
+summary now has present->display mean/max and the game's GPU page-fault waits per frame.
+
+| swapchain images | present->display, gameplay mean | FPS | frames shown late |
+|---|---|---|---|
+| 3 (old default) | 48.4–48.7 ms (65 ms in some stretches) | 59.92 | 0–1 per 90 s |
+| **2 (new macOS default)** | **31.7 ms** (48.5 in some stretches) | 59.92 | 0–1 per 90 s |
+
+- The latency is bimodal (31.6 or 48.5 ms with two images) and switches every minute or so.
+  It is not a queued frame: skipping a flip slot did not lower it. It tracks when the frame's
+  GPU work ends relative to the vsync: "flip submit -> GPU done" rose 13.0 -> 14.4 ms when it
+  went 31.6 -> 48.5. A frame that finishes after the vsync is shown one vsync later. The
+  steady-clock frame limiter drifts through the vsync interval, which moves that point.
+- Tried and dropped: pacing flips by the display's vsync times (VK_GOOGLE_display_timing:
+  measured period and phase, flips just after a vsync, no catch-up after a late frame). 3+3
+  walks, pacing on vs off: latency the same (one run of each jumped to 48 ms), frames shown
+  late 17 vs 3: a frame slightly late for its grid slot waited a whole vsync.
+- Game-side GPU page faults are not the long game frames: ~1–3 per frame, ~0.1 ms waited.
+- Long game frames in this scene are rare in gameplay (0–3 per 5 s); the 33 ms "game" spikes in
+  the first minute are the title and loading screens, which run at 30 FPS.
+
 ## Part 3 — Open issues
 
 | Issue | Status |

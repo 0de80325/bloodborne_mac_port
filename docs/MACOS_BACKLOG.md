@@ -88,6 +88,9 @@ Each item: what was done for now, what the refinement is, and where it lives.
   then the game waits too) and runs of 4–5 frames where the recording thread is busy 20–25 ms
   (normal ~15) with the same draw count. *Next:* what the GPU does in the 50 ms frames (Metal
   System Trace at the spike), and why recording slows (MoltenVK encoding, CPU contention).
+  *2026-10-14, later:* game-side GPU page faults ruled out (spike lines now show them: ~1–3 per
+  frame, ~0.1 ms). In the Hunter's Dream gameplay has 0–3 long game frames per 5 s; most
+  "game" spikes in a run are title/loading screens at 30 FPS. Re-measure in Central Yharnam.
 - **Fixed 2026-10-14: full screen froze the window** (⌃⌘F / green button: the picture
   stopped, the window stayed off screen at its old size while the game kept running). The
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue
@@ -95,12 +98,15 @@ Each item: what was done for now, what the refinement is, and where it lives.
   the host and bb-probe restart the main run loop when SDL stops it (it does on entering full
   screen; before, the process then exited). *Remaining:* `contents scale 1.0`: the swapchain is
   at point size, not Retina pixels (full screen at 1496x938 on this display).
-- **Display latency 34–76 ms (mean 51) from `vkQueuePresent` to the screen** (2026-10-14,
-  VK_GOOGLE_display_timing). Two to four vsyncs of queued drawables: input lag. Try fewer
-  swapchain images / `maximumDrawableCount` 2 and measure judder and FPS with it.
-- **Frame timeline counters on M1–M3** (`rec_busy_ns`, `frames_ahead_ns`, … in BbStats) add
-  `CpuCycles()` deltas and print them as ns: right on the M4 (1 GHz counter), 41.7x too small
-  on 24 MHz Macs. Convert with the counter frequency.
+- **Display latency (2026-10-14).** *Done:* two drawables on macOS (`BB_SWAPCHAIN_IMAGES`
+  overrides): `vkQueuePresent` to the screen 48.5 -> 31.7 ms mean, same FPS and late frames
+  (FINDINGS "Display latency"). *Remaining:* it still jumps to ~48 ms when the frame's GPU work
+  ends after the vsync (GPU ~13–14.5 ms of 16.7 in the Dream); less GPU time per frame is the
+  lever. Display-clock flip pacing was tried and made late frames worse (dropped). Check on
+  slower Macs that are GPU-bound below 60 that two drawables do not cost FPS.
+- **Fixed 2026-10-14: frame timeline counters on M1–M3** printed `CpuCycles()` deltas as ns
+  (41.7x too small on 24 MHz counters); now converted with `bbport::CyclesToNs` (CNTFRQ_EL0 on
+  arm64, calibrated once under Rosetta).
 - **Fixed 2026-10-13: pipelines Metal rejected after a cached session** ("cannot reserve
   'buffer' resource location"): shader permutation indices reused across sessions. *Remaining:*
   one pixel shader (`fs_fbe7c4b6`) has two cached permutations that compare equal ("conflicts
@@ -159,6 +165,11 @@ Each item: what was done for now, what the refinement is, and where it lives.
   chunk users ("two threads use the recording chunk at once", with both callers and a
   backtrace). Not reproduced in 6 reloads. *Next:* read that report from the next crash, add
   the missing drain there.
+  *Same day, test runs:* the load-time corrupted command buffer (cloth-thread entry above) also
+  killed the host twice in ~14 test loads: `SignalFence: Unreachable code!` (pm4_cmds.h:492)
+  after "Gnm check: bad packet", and a SIGSEGV in `Shader::StageSpecialization` building a
+  draw from corrupted shader state. Fixing the root cause covers these; until then both could
+  skip the draw/fence instead of ending the host.
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.

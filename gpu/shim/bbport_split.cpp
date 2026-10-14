@@ -3,6 +3,7 @@
 #include "bbport_split.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <thread>
@@ -128,6 +129,7 @@ bool RelayFault(u64 address, bool write) {
     if (address < BBGPU_GUEST_MIN || address >= BBGPU_GUEST_MAX) {
         return false;
     }
+    const auto start = std::chrono::steady_clock::now();
     const int slot = bbgpu_reply_claim(g_shared);
     const BbGpuFault fault{{BBGPU_REC_FAULT, sizeof(BbGpuFault)}, address, static_cast<u32>(slot),
                            write ? 1u : 0u};
@@ -145,6 +147,11 @@ bool RelayFault(u64 address, bool write) {
             PeerLost("GPU host");
         }
     }
+    const auto waited = std::chrono::steady_clock::now() - start;
+    __atomic_add_fetch(&g_shared->game_faults, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_shared->game_fault_ns,
+                       u64(std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count()),
+                       __ATOMIC_RELAXED);
     return handled != 0;
 }
 

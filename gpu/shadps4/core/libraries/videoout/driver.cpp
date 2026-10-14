@@ -339,14 +339,14 @@ struct FrameTrace {
     Vulkan::Presenter::PresentTiming present;
     // What the GPU process did between the previous flip and this one.
     double gpu_cpu_ms, rec_busy_ms, rec_idle_ms, ahead_ms, drain_ms, host_copies_ms,
-        compile_wait_ms;
-    u64 preempted, draws, compiles, gpu_done;
+        compile_wait_ms, game_fault_ms;
+    u64 preempted, draws, compiles, gpu_done, game_faults;
 };
 
 /// Counter deltas between flips. Counters the 5 s summary resets are re-based by Rebase().
 struct SpikeCounters {
     enum : u32 { GpuCpu, Preempted, Draws, RecBusy, RecIdle, Ahead, Drain, HostCopies,
-                 CompileWait, Compiles, GpuDone, Count };
+                 CompileWait, Compiles, GpuDone, GameFaults, GameFaultNs, Count };
     u64 last[Count]{};
     static void Read(u64* v) {
         v[GpuCpu] = BbStats::gpu_user_us.load() + BbStats::gpu_sys_us.load();
@@ -360,6 +360,9 @@ struct SpikeCounters {
         v[CompileWait] = BbStats::compile_wait_ns.load();
         v[Compiles] = Vulkan::g_bb_compiles.load();
         v[GpuDone] = BbStats::gpu_done_frames.load();
+        BbGpuShared* shared = BbSplit::Host() ? BbSplit::Shared() : nullptr;
+        v[GameFaults] = shared ? __atomic_load_n(&shared->game_faults, __ATOMIC_RELAXED) : 0;
+        v[GameFaultNs] = shared ? __atomic_load_n(&shared->game_fault_ns, __ATOMIC_RELAXED) : 0;
     }
     void Fill(FrameTrace& t) {
         u64 now[Count];
@@ -380,6 +383,8 @@ struct SpikeCounters {
         t.draws = d[Draws];
         t.compiles = d[Compiles];
         t.gpu_done = d[GpuDone];
+        t.game_faults = d[GameFaults];
+        t.game_fault_ms = d[GameFaultNs] / 1e6;
     }
     /// After the summary exchanged its counters to zero.
     void Rebase() {
@@ -389,30 +394,38 @@ struct SpikeCounters {
 
 std::atomic<u32> spikes_game, spikes_flip, spikes_present, spikes_display, spikes_printed,
     frames_not_displayed;
+/// vkQueuePresent to the screen (display timing), for the 5 s summary.
+std::atomic<u64> latency_sum_ns, latency_count, latency_max_ns;
+
+/// MoltenVK reports Metal's presentedTime: the uptime clock, which stops while the Mac sleeps;
+/// the steady clock does not. 0 (not displayed) stays 0.
+u64 DisplayTimeToSteady(u64 display_time) {
+    if (!display_time) {
+        return 0;
+    }
+#ifdef __APPLE__
+    return display_time + (NowNs() - clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+#else
+    return display_time;
+#endif
+}
 
 /// Runs on the presenting thread: matches display times to frames and reports late ones.
 class SpikeLog {
 public:
-    void OnPresented(const std::shared_ptr<FrameTrace>& trace) {
+    void OnPresented(const std::shared_ptr<FrameTrace>& trace,
+                     const std::vector<vk::PastPresentationTimingGOOGLE>& timings) {
         if (!display_timing) {
             Evaluate(*trace);
             return;
         }
         pending[trace->id % pending.size()] = trace;
-        for (const auto& timing : presenter->TakePastTimings()) {
+        for (const auto& timing : timings) {
             auto& entry = pending[timing.presentID % pending.size()];
             if (!entry || entry->id != timing.presentID) {
                 continue;
             }
-            // MoltenVK reports Metal's presentedTime: the uptime clock, which stops while the
-            // Mac sleeps; the steady clock does not.
-#ifdef __APPLE__
-            const u64 uptime_offset = NowNs() - clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-#else
-            const u64 uptime_offset = 0;
-#endif
-            entry->display_ns =
-                timing.actualPresentTime ? timing.actualPresentTime + uptime_offset : 0;
+            entry->display_ns = DisplayTimeToSteady(timing.actualPresentTime);
             if (timing.actualPresentTime == 0) {
                 frames_not_displayed.fetch_add(1, std::memory_order_relaxed);
             }
@@ -425,6 +438,14 @@ public:
 
 private:
     void Evaluate(const FrameTrace& t) {
+        if (t.display_ns > t.present.presented && t.present.presented) {
+            const u64 latency = t.display_ns - t.present.presented;
+            latency_sum_ns.fetch_add(latency, std::memory_order_relaxed);
+            latency_count.fetch_add(1, std::memory_order_relaxed);
+            if (latency > latency_max_ns.load(std::memory_order_relaxed)) {
+                latency_max_ns.store(latency, std::memory_order_relaxed);
+            }
+        }
         if (!have_prev) {
             prev = t;
             have_prev = true;
@@ -459,7 +480,7 @@ private:
                 "vkQueuePresent %.1f), presented->display %.1f | GPU thread on CPU %.1f ms, %llu "
                 "preempted, %llu draws; recording busy %.1f idle %.1f, frames-ahead wait %.1f, "
                 "recorder waits %.1f, host copies %.1f; %llu GPU frames done; %llu compiles "
-                "(%.1f ms waited)\n",
+                "(%.1f ms waited) | game: %llu GPU page faults, %.1f ms waited\n",
                 t.id, t.id - prev.id, prev.id, game, mark(late_game), flip, mark(late_flip),
                 present, mark(late_present), display, mark(late_display),
                 gap(t.arrival_ns, t.game_ns), gap(t.flip_packet_ns, t.arrival_ns),
@@ -472,7 +493,8 @@ private:
                 static_cast<unsigned long long>(t.draws), t.rec_busy_ms, t.rec_idle_ms,
                 t.ahead_ms, t.drain_ms, t.host_copies_ms,
                 static_cast<unsigned long long>(t.gpu_done),
-                static_cast<unsigned long long>(t.compiles), t.compile_wait_ms);
+                static_cast<unsigned long long>(t.compiles), t.compile_wait_ms,
+                static_cast<unsigned long long>(t.game_faults), t.game_fault_ms);
         }
         prev = t;
     }
@@ -563,7 +585,7 @@ void VideoOutDriver::Flip(const Request& req) {
         presenter->Present(frame, false, true, trace ? trace->id : 0);
         if (trace) {
             trace->present = presenter->LastPresentTiming();
-            spike_log.OnPresented(trace);
+            spike_log.OnPresented(trace, presenter->TakePastTimings());
         }
     });
 
@@ -793,12 +815,16 @@ void VideoOutDriver::Flip(const Request& req) {
             }
             if (BbStats::enabled) {
                 const u32 shown = spikes_printed.exchange(0);
+                const u64 latency_frames = std::max<u64>(1, latency_count.exchange(0));
                 std::printf("Spikes (frames later than 1.25 periods): game %u, flip %u, present "
-                            "%u, display %u%s; %u frames never displayed\n",
+                            "%u, display %u%s; %u frames never displayed; present->display "
+                            "mean %.1f ms, max %.1f ms\n",
                             spikes_game.exchange(0), spikes_flip.exchange(0),
                             spikes_present.exchange(0), spikes_display.exchange(0),
                             shown > 20 ? " (first 20 printed)" : "",
-                            frames_not_displayed.exchange(0));
+                            frames_not_displayed.exchange(0),
+                            latency_sum_ns.exchange(0) / 1e6 / double(latency_frames),
+                            latency_max_ns.exchange(0) / 1e6);
                 spike_counters.Rebase();
             }
             intervals.clear();

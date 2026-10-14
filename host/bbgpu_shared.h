@@ -33,7 +33,7 @@
 #define BBGPU_GUEST_MAX UINT64_C(0xfc00000000)
 
 #define BBGPU_SHARED_MAGIC 0x31424742u /* "BGB1" */
-#define BBGPU_SHARED_VERSION 3u /* 3: command buffer copy arena */
+#define BBGPU_SHARED_VERSION 4u /* 3: command buffer copy arena; 4: game fault counters */
 #define BBGPU_CONTROL_SIZE (UINT64_C(4) << 20) /* control block and rings */
 /* Command buffer copies (game side, at submit; the host parses these): the game may rewrite its
  * command buffers once the submit returns, before the host has parsed them. */
@@ -199,6 +199,9 @@ typedef struct {
     /* M4: the last protect request the game applied (futex word; compare as signed u32 deltas). */
     BBGPU_ALIGNAS(BBGPU_CACHE_LINE) uint32_t protect_done;
     BbGpuRing submit, events, protect, faults;
+    /* Game side, for the spike log: faults on GPU-tracked pages relayed to the host, and the
+     * time the faulting game threads waited for them (steady clock ns). */
+    BBGPU_ALIGNAS(BBGPU_CACHE_LINE) uint64_t game_faults, game_fault_ns;
 } BbGpuShared;
 
 #define BBGPU_SUBMIT_RING_OFFSET (UINT64_C(64) << 10)

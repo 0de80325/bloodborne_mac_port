@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -261,6 +262,16 @@ void Swapchain::SetSurfaceProperties() {
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
     image_count = capabilities.minImageCount + 1;
+#ifdef __APPLE__
+    // bbport: two drawables. Measured 2026-10-14 (M4 Max, 60 FPS gameplay): vkQueuePresent to
+    // the screen 48.5 -> 31.7 ms mean with the same frame rate and late frames as three.
+    // The GPU command thread already runs at most one frame ahead (BB_FRAMES_AHEAD).
+    image_count = std::max<u32>(capabilities.minImageCount, 2);
+#endif
+    // BB_SWAPCHAIN_IMAGES overrides (3 = the previous default).
+    if (const char* env = std::getenv("BB_SWAPCHAIN_IMAGES")) {
+        image_count = std::max<u32>(capabilities.minImageCount, u32(std::atoi(env)));
+    }
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }

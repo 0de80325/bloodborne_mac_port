@@ -437,7 +437,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const u64 flush_start = bbport::CpuCycles();
     draw_scheduler.Flush(info);
     const u64 flush_end = bbport::CpuCycles();
-    BbStats::flip_submit_ns.fetch_add(flush_end - flush_start, std::memory_order_relaxed);
+    BbStats::flip_submit_ns.fetch_add(bbport::CyclesToNs(flush_end - flush_start),
+                                      std::memory_order_relaxed);
     if (BbStats::enabled) {
         WatchFrameCompletion(frame->ready_tick, flush_end);
     }
@@ -459,8 +460,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             if (recent_frame_ticks.size() == frames_ahead) {
                 const u64 wait_start = bbport::CpuCycles();
                 draw_scheduler.Wait(tick);
-                BbStats::frames_ahead_ns.fetch_add(bbport::CpuCycles() - wait_start,
-                                                   std::memory_order_relaxed);
+                BbStats::frames_ahead_ns.fetch_add(
+                    bbport::CyclesToNs(bbport::CpuCycles() - wait_start), std::memory_order_relaxed);
             }
         }
     }
@@ -488,9 +489,11 @@ void Presenter::WatchFrameCompletion(u64 tick, u64 submitted) {
                 }
                 draw_scheduler.GetWorkSemaphore()->Wait(item.first);
                 const u64 done = bbport::CpuCycles();
-                BbStats::gpu_latency_ns.fetch_add(done - item.second, std::memory_order_relaxed);
+                BbStats::gpu_latency_ns.fetch_add(bbport::CyclesToNs(done - item.second),
+                                                  std::memory_order_relaxed);
                 if (last_done) {
-                    BbStats::gpu_done_gap_ns.fetch_add(done - last_done, std::memory_order_relaxed);
+                    BbStats::gpu_done_gap_ns.fetch_add(bbport::CyclesToNs(done - last_done),
+                                                       std::memory_order_relaxed);
                     BbStats::gpu_done_frames.fetch_add(1, std::memory_order_relaxed);
                 }
                 last_done = done;

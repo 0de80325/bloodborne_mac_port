@@ -119,7 +119,7 @@ public:
             }
         }
         const u64 waited = bbport::CpuCycles() - start;
-        BbStats::drain_ns.fetch_add(waited, std::memory_order_relaxed); // 1 GHz counter
+        BbStats::drain_ns.fetch_add(bbport::CyclesToNs(waited), std::memory_order_relaxed);
         drain_cycles += waited;
         cycles_by_reason[slot] += waited;
     }
@@ -198,7 +198,7 @@ private:
                     }
                     available = published.load(std::memory_order_acquire);
                 }
-                BbStats::rec_idle_ns.fetch_add(bbport::CpuCycles() - idle_start,
+                BbStats::rec_idle_ns.fetch_add(bbport::CyclesToNs(bbport::CpuCycles() - idle_start),
                                                std::memory_order_relaxed);
             }
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
@@ -211,7 +211,7 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             const u64 busy = bbport::CpuCycles() - start;
             busy_cycles.fetch_add(busy, std::memory_order_relaxed);
-            BbStats::rec_busy_ns.fetch_add(busy, std::memory_order_relaxed);
+            BbStats::rec_busy_ns.fetch_add(bbport::CyclesToNs(busy), std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }
