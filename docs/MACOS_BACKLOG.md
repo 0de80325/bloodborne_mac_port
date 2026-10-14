@@ -91,6 +91,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   between frames, and `GXRenderThread` waits for it before starting the next frame (a guest
   call-site patch to a trampoline in low memory, with a timeout against deadlock). Still open:
   the SIGSEGV in `Shader::StageSpecialization` on corrupted shader state (not seen since).
+  **Option B done (2026-10-14 night, `src/runtime_hooks.c`):** `0xebb960` and the render
+  thread's frame job `0x2199af0` are hooked at their entries and run under one lock (100 ms
+  timeout, then the function runs anyway and says so; `BB_CONTEXT_LOCK=0` disables). 10 walks
+  with 16 busy processes (9 reached the level): 0 corrupted buffers, the main thread waited
+  0.3–0.7 ms for the render thread's frame in 5 of 9 loads (each a prevented overlap), no
+  timeouts. Option A stays as a safety net. *Watch:* missing geometry after loads (entry below)
+  should stop if it came from this race.
 - **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
   host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
   the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
@@ -116,8 +123,10 @@ Each item: what was done for now, what the refinement is, and where it lives.
   window's event loop ran forever inside one main-queue block, starving AppKit's own main-queue
   work for the transition. Events are now polled from a 2 ms run loop timer (common modes), and
   the host and bb-probe restart the main run loop when SDL stops it (it does on entering full
-  screen; before, the process then exited). *Remaining:* `contents scale 1.0`: the swapchain is
-  at point size, not Retina pixels (full screen at 1496x938 on this display).
+  screen; before, the process then exited). *Fixed 2026-10-14 night:* the window is created
+  with high pixel density, so the swapchain has the display's pixels (full screen 2992x1876
+  instead of 1496x938 stretched; `BB_HIGH_DPI=0` for the old behaviour; "Window: WxH pixels"
+  in the log).
 - **Display latency (2026-10-14).** *Done:* two drawables on macOS (`BB_SWAPCHAIN_IMAGES`
   overrides): `vkQueuePresent` to the screen 48.5 -> 31.7 ms mean, same FPS and late frames
   (FINDINGS "Display latency"). *Remaining:* it still jumps to ~48 ms when the frame's GPU work

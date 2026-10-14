@@ -23,6 +23,14 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#ifdef __APPLE__
+    // Retina: the Metal layer gets the display's pixels, not its points (a 1496x938 point full
+    // screen is 2992x1876 pixels; without this the picture was presented at half size and
+    // stretched). BB_HIGH_DPI=0 keeps point size.
+    const char* high_dpi = std::getenv("BB_HIGH_DPI");
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN,
+                           !(high_dpi && high_dpi[0] == '0'));
+#endif
     const char* fullscreen = std::getenv("BB_FULLSCREEN");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen && fullscreen[0] == '1');
     base_title = title;
@@ -57,6 +65,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     width = w;
     height = h;
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
+    std::printf("Window: %dx%d pixels, density %.1f\n", w, h, SDL_GetWindowPixelDensity(window));
 }
 
 WindowSDL::~WindowSDL() {
@@ -125,6 +134,9 @@ bool WindowSDL::PollEvents() {
         case SDL_EVENT_WINDOW_RESIZED: {
             int w = 0, h = 0;
             SDL_GetWindowSizeInPixels(window, &w, &h);
+            if (w != width || h != height) {
+                std::printf("Window: %dx%d pixels\n", w, h);
+            }
             width = w;
             height = h;
             break;
