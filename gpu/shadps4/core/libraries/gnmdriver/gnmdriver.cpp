@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <mutex>
+#include <string>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <tuple>
+#include "bbport_cpu.h"
 #include <type_traits>
 #include <vector>
 #include <xxhash.h>
@@ -117,14 +124,38 @@ static void WaitGpuIdle() {
 // submit (CheckCommandBuffer): a broken packet stream is reported here, in the game's process,
 // with the library calls that wrote around the bad word.
 namespace {
+constexpr int GuestFrames = 8;
 struct GnmCall {
     const char* name;
     u64 cmdbuf, size, seq, thread;
     s64 result;
+    u64 tsc;
+    u64 frames[GuestFrames]; ///< guest return addresses: the caller, then up the frame-pointer chain
+    u64 rbx;       ///< the caller's rbx: Gnmx's CommandBuffer* ("this") in its sceGnm wrappers
+                   ///< (shader setters only: TraceEntry)
+    u64 owner;     ///< that context's owning thread (scePthreadSelf) at the call, ~0 = unread
 };
-constexpr u64 GnmCallRing = 16384;
+
+/// Lock calls (BB_SYNC_TRACE=1), one ring per thread so tracing shares no cache line between
+/// threads (a shared counter hid the load-time race: 0 bad packets in 30 loads).
+struct SyncEntry {
+    u64 tsc;
+    const char* op;
+    u64 object;
+    s64 result;
+};
+struct SyncRing {
+    static constexpr u64 Size = 4096;
+    u64 thread = 0, head = 0;
+    SyncEntry entries[Size];
+};
+std::mutex sync_rings_mutex;
+std::vector<SyncRing*> sync_rings;
+constexpr u64 GnmCallRing = 65536;
 GnmCall gnm_calls[GnmCallRing];
 std::atomic<u64> gnm_call_seq{0};
+
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 u64 TraceThreadId() {
     thread_local const u64 id = [] {
@@ -135,9 +166,134 @@ u64 TraceThreadId() {
     return id;
 }
 
-void RecordGnmCall(const char* name, u64 cmdbuf, u64 size, s64 result) {
+/// The engine's graphics contexts (Bloodborne 1.09): the CommandBuffer sits 0x10 into a holder
+/// whose owning thread (scePthreadSelf, checked before the context is used) is at +0xb718.
+u64 ContextOwner(u64 command_buffer) {
+    u64 owner = ~u64(0);
+    if (command_buffer) {
+        runtime_memory_read_backing(command_buffer - 0x10 + 0xb718, &owner, sizeof(owner));
+    }
+    return owner;
+}
+
+std::string FramesList(const u64* frames);
+
+/// Reports an owned context written by another thread within 5 ms of its last user (the
+/// load-time overlap: the main thread records into GXRenderThread's immediate context while
+/// GXRenderThread starts its next frame; MACOS_BACKLOG). Unowned (worker) contexts change
+/// threads by design.
+void NoteContextUser(u64 context, u64 thread, u64 tsc, u64 owner, u64 cmdbuf,
+                     const u64* frames) {
+    struct User {
+        std::atomic<u64> context, thread, tsc;
+    };
+    static User users[64];
+    static std::atomic<u32> reports{0};
+    User& user = users[(context >> 4) % 64];
+    const u64 last_context = user.context.exchange(context, std::memory_order_relaxed);
+    const u64 last_thread = user.thread.exchange(thread, std::memory_order_relaxed);
+    const u64 last_tsc = user.tsc.exchange(tsc, std::memory_order_relaxed);
+    if (last_context != context || last_thread == thread || !last_thread || !owner ||
+        owner == ~u64(0)) {
+        return;
+    }
+    const u64 gap_ns = bbport::CyclesToNs(tsc - last_tsc);
+    if (gap_ns < 5'000'000 && reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+        std::fprintf(stderr, "Gnm: context %#llx used by thread %llu, then %llu after %.1f us "
+                             "(owner %#llx, buffer %#llx) from %s\n",
+                     (unsigned long long)context, (unsigned long long)last_thread,
+                     (unsigned long long)thread, double(gap_ns) / 1e3,
+                     (unsigned long long)owner, (unsigned long long)cmdbuf,
+                     FramesList(frames).c_str());
+    }
+}
+
+void RecordGnmCall(const char* name, u64 cmdbuf, u64 size, s64 result, const u64* frames,
+                   u64 rbx) {
+    const u64 owner = rbx ? ContextOwner(rbx) : ~u64(0);
+    if (rbx) {
+        NoteContextUser(rbx, TraceThreadId(), bbport::CpuCycles(), owner, cmdbuf, frames);
+    }
     const u64 seq = gnm_call_seq.fetch_add(1, std::memory_order_relaxed);
-    gnm_calls[seq % GnmCallRing] = {name, cmdbuf, size, seq, TraceThreadId(), result};
+    gnm_calls[seq % GnmCallRing] = {name,
+                                    cmdbuf,
+                                    size,
+                                    seq,
+                                    TraceThreadId(),
+                                    result,
+                                    bbport::CpuCycles(),
+                                    {},
+                                    rbx,
+                                    owner};
+    std::copy(frames, frames + GuestFrames, gnm_calls[seq % GnmCallRing].frames);
+}
+
+/// Reads memory that may be unmapped (fiber stacks outside the thread's stack): false instead of
+/// a fault.
+bool SafeRead(u64 address, void* out, u64 size) {
+    mach_vm_size_t got = 0;
+    return mach_vm_read_overwrite(mach_task_self(), address, size,
+                                  reinterpret_cast<mach_vm_address_t>(out), &got) == KERN_SUCCESS &&
+           got == size;
+}
+
+/// The guest code that called this HLE function and its callers (rbp chain, guest code keeps
+/// frame pointers). Guest jobs run on fiber stacks, not the thread's: frames are taken within
+/// 256 KiB above this one, and outside the thread's stack read with SafeRead. A macro: the
+/// builtins need the HLE frame.
+#define CAPTURE_GUEST_FRAMES(out)                                                              \
+    do {                                                                                       \
+        (out)[0] = u64(__builtin_return_address(0));                                           \
+        const u64 lo = u64(__builtin_frame_address(0));                                        \
+        const u64 hi = u64(pthread_get_stackaddr_np(pthread_self()));                          \
+        u64 fp = *reinterpret_cast<const u64*>(lo);                                            \
+        for (int i = 1; i < GuestFrames; ++i) {                                                \
+            u64 pair[2];                                                                       \
+            if (fp <= lo || fp - lo > 0x40000 || (fp & 7)) {                                   \
+                break;                                                                         \
+            }                                                                                  \
+            if (fp + 16 <= hi) {                                                               \
+                std::memcpy(pair, reinterpret_cast<const void*>(fp), sizeof(pair));            \
+            } else if (!SafeRead(fp, pair, sizeof(pair))) {                                    \
+                break;                                                                         \
+            }                                                                                  \
+            (out)[i] = pair[1];                                                                \
+            fp = pair[0];                                                                      \
+        }                                                                                      \
+    } while (0)
+
+/// "a<b<c" with eboot-relative addresses.
+std::string FramesList(const u64* frames) {
+    std::string text;
+    for (int i = 0; i < GuestFrames && frames[i]; ++i) {
+        const u64 f = frames[i];
+        char part[24];
+        std::snprintf(part, sizeof(part), "%s%llx", i ? "<" : "",
+                      (unsigned long long)(f >= 0x800000000ull && f < 0x900000000ull
+                                               ? f - 0x800000000ull
+                                               : f));
+        text += part;
+    }
+    return text;
+}
+
+/// " from a<b<c" and the caller's context, for the bad-packet report.
+std::string FramesText(const GnmCall& call) {
+    std::string text = " from " + FramesList(call.frames);
+    // Gnmx CommandBuffer (begin, end, cmdptr, callback, userdata) when rbx holds one; read now,
+    // so cmdptr may have moved on since the call.
+    char part[128];
+    std::snprintf(part, sizeof(part), " | rbx %llx owner %llx", (unsigned long long)call.rbx,
+                  (unsigned long long)call.owner);
+    text += part;
+    u64 object[5]{};
+    if (call.rbx && runtime_memory_read_backing(call.rbx, object, sizeof(object))) {
+        std::snprintf(part, sizeof(part), " (cmdptr now %llx, callback %llx, userdata %llx)",
+                      (unsigned long long)object[2], (unsigned long long)object[3],
+                      (unsigned long long)object[4]);
+        text += part;
+    }
+    return text;
 }
 
 template <auto F>
@@ -151,13 +307,15 @@ struct TracedCall<F> {
             using Second = std::tuple_element_t<1, std::tuple<A...>>;
             if constexpr (std::is_pointer_v<First> && std::is_integral_v<Second>) {
                 const auto tuple = std::forward_as_tuple(args...);
+                u64 frames[GuestFrames]{};
+                CAPTURE_GUEST_FRAMES(frames);
                 const R result = F(args...);
                 s64 value = 0;
                 if constexpr (std::is_integral_v<R>) {
                     value = s64(result);
                 }
                 RecordGnmCall(name, reinterpret_cast<u64>(std::get<0>(tuple)),
-                              u64(std::get<1>(tuple)), value);
+                              u64(std::get<1>(tuple)), value, frames, 0);
                 return result;
             }
         }
@@ -165,6 +323,21 @@ struct TracedCall<F> {
     }
 };
 
+} // namespace
+
+extern "C" void bbgpu_record_sync(const char* op, uintptr_t object, int64_t result) {
+    thread_local SyncRing* ring = [] {
+        auto* r = new SyncRing;
+        r->thread = TraceThreadId();
+        std::scoped_lock lk{sync_rings_mutex};
+        sync_rings.push_back(r);
+        return r;
+    }();
+    ring->entries[ring->head % SyncRing::Size] = {bbport::CpuCycles(), op, u64(object), result};
+    ring->head = ring->head + 1;
+}
+
+namespace {
 /// Walks a command buffer's packet headers; the dword index of the first invalid one, or -1.
 s64 FirstBadPacket(const u32* words, u64 count) {
     u64 i = 0;
@@ -208,15 +381,83 @@ void CheckCommandBuffer(const char* kind, const u32* buffer, u32 bytes) {
             hits.push_back(call);
         }
     }
-    std::fprintf(stderr, "\n  %zu library calls wrote into this buffer (last 16k calls); "
-                         "around the bad word:\n", hits.size());
+    std::fprintf(stderr, "\n  %zu library calls wrote into this buffer (last 64k calls):\n",
+                 hits.size());
     for (const GnmCall& call : hits) {
         const s64 word = s64(call.cmdbuf - base) / 4;
-        if (word >= bad - 64 && word <= bad + 16) {
-            std::fprintf(stderr, "    word %lld: %s(size %llu) -> %lld, thread %llu, call %llu\n",
-                         (long long)word, call.name, (unsigned long long)call.size,
-                         (long long)call.result, (unsigned long long)call.thread,
-                         (unsigned long long)call.seq);
+        std::fprintf(stderr, "    word %lld: %s(size %llu) -> %lld, thread %llu, call %llu%s\n",
+                     (long long)word, call.name, (unsigned long long)call.size,
+                     (long long)call.result, (unsigned long long)call.thread,
+                     (unsigned long long)call.seq, FramesText(call).c_str());
+    }
+    // The threads that wrote into this buffer, interleaved with their lock calls (load crash: two threads
+    // were handed overlapping command buffer space; which lock did each hold?).
+    {
+        std::vector<u64> writers;
+        u64 first_seq = ~u64(0), last_seq = 0;
+        for (const GnmCall& call : hits) {
+            if (std::find(writers.begin(), writers.end(), call.thread) == writers.end()) {
+                writers.push_back(call.thread);
+            }
+            first_seq = std::min(first_seq, call.seq);
+            last_seq = std::max(last_seq, call.seq);
+        }
+        struct Line {
+            u64 tsc, thread;
+            std::string text;
+        };
+        std::vector<Line> lines;
+        if (!writers.empty()) {
+            const u64 oldest = newest > GnmCallRing ? newest - GnmCallRing : 0;
+            const u64 from = std::max(oldest, first_seq > 300 ? first_seq - 300 : 0);
+            const u64 to = std::min(newest, last_seq + 40);
+            u64 tsc_from = ~u64(0), tsc_to = 0;
+            for (u64 seq = from; seq < to; ++seq) {
+                const GnmCall& call = gnm_calls[seq % GnmCallRing];
+                if (call.seq != seq ||
+                    std::find(writers.begin(), writers.end(), call.thread) == writers.end()) {
+                    continue;
+                }
+                tsc_from = std::min(tsc_from, call.tsc);
+                tsc_to = std::max(tsc_to, call.tsc);
+                char text[160];
+                if (call.cmdbuf >= base && call.cmdbuf < base + bytes) {
+                    std::snprintf(text, sizeof(text), "%s word %lld size %llu", call.name,
+                                  (long long)(s64(call.cmdbuf - base) / 4),
+                                  (unsigned long long)call.size);
+                } else {
+                    std::snprintf(text, sizeof(text), "%s at %#llx (another buffer)", call.name,
+                                  (unsigned long long)call.cmdbuf);
+                }
+                lines.push_back({call.tsc, call.thread, text + FramesText(call)});
+            }
+            std::scoped_lock lk{sync_rings_mutex};
+            for (const SyncRing* ring : sync_rings) {
+                if (std::find(writers.begin(), writers.end(), ring->thread) == writers.end()) {
+                    continue;
+                }
+                const u64 head = ring->head;
+                for (u64 n = head > SyncRing::Size ? head - SyncRing::Size : 0; n < head; ++n) {
+                    const SyncEntry& e = ring->entries[n % SyncRing::Size];
+                    if (e.tsc < tsc_from || e.tsc > tsc_to) {
+                        continue;
+                    }
+                    char text[160];
+                    std::snprintf(text, sizeof(text), "  %s %#llx -> %#llx", e.op,
+                                  (unsigned long long)e.object, (unsigned long long)e.result);
+                    lines.push_back({e.tsc, ring->thread, text});
+                }
+            }
+            std::sort(lines.begin(), lines.end(),
+                      [](const Line& a, const Line& b) { return a.tsc < b.tsc; });
+            std::fprintf(stderr, "  library and lock calls of those %zu threads (%zu, by time):\n",
+                         writers.size(), lines.size());
+            const size_t skip = lines.size() > 6000 ? lines.size() - 6000 : 0;
+            for (size_t k = skip; k < lines.size(); ++k) {
+                std::fprintf(stderr, "    +%.1fus t%llu %s\n",
+                             double(bbport::CyclesToNs(lines[k].tsc - tsc_from)) / 1e3,
+                             (unsigned long long)lines[k].thread, lines[k].text.c_str());
+            }
         }
     }
     // Where the thread that wrote last before the bad word went next (a buffer switch?).
@@ -234,12 +475,13 @@ void CheckCommandBuffer(const char* kind, const u32* buffer, u32 bytes) {
                 continue;
             }
             std::fprintf(stderr, "    then on that thread: %s(size %llu) at %#llx (%s) -> %lld, "
-                                 "call %llu\n",
+                                 "call %llu%s\n",
                          call.name, (unsigned long long)call.size,
                          (unsigned long long)call.cmdbuf,
                          call.cmdbuf >= base && call.cmdbuf < base + bytes ? "this buffer"
                                                                            : "another buffer",
-                         (long long)call.result, (unsigned long long)call.seq);
+                         (long long)call.result, (unsigned long long)call.seq,
+                         FramesText(call).c_str());
             ++shown;
         }
     }
@@ -3298,13 +3540,99 @@ int PS4_SYSV_ABI Func_F916890425496553() {
     return ORBIS_OK;
 }
 
+// bbport: the shader setters also record the caller's rbx, which in Gnmx's wrappers holds the
+// CommandBuffer ("this"): which object each thread wrote through (load-time overlap). C++ cannot
+// read a callee-saved register at entry (the prologue may reuse it first), so an assembly stub
+// passes rbx as an extra argument.
+namespace {
+template <auto F>
+u64 TraceEntry() {
+    return reinterpret_cast<u64>(&TracedCall<F>::Call);
+}
+#ifdef __x86_64__
+template <s32(PS4_SYSV_ABI* F)(u32*, u32, const u32*)>
+s32 PS4_SYSV_ABI TracedShader3(u32* cmdbuf, u32 size, const u32* regs, u64 rbx) {
+    u64 frames[GuestFrames]{};
+    CAPTURE_GUEST_FRAMES(frames);
+    const s32 result = F(cmdbuf, size, regs);
+    RecordGnmCall(TracedCall<F>::name, reinterpret_cast<u64>(cmdbuf), size, result, frames, rbx);
+    return result;
+}
+s32 PS4_SYSV_ABI TracedVsShader(u32* cmdbuf, u32 size, const u32* regs, u32 modifier, u64 rbx) {
+    u64 frames[GuestFrames]{};
+    CAPTURE_GUEST_FRAMES(frames);
+    const s32 result = sceGnmSetVsShader(cmdbuf, size, regs, modifier);
+    RecordGnmCall(TracedCall<&sceGnmSetVsShader>::name, reinterpret_cast<u64>(cmdbuf), size,
+                  result, frames, rbx);
+    return result;
+}
+} // namespace
+} // namespace Libraries::GnmDriver
+// Called only from the stubs below: kept and not renamed under LTO.
+extern "C" [[gnu::used, gnu::visibility("hidden")]] s32 PS4_SYSV_ABI
+BbTracedCsShader(u32* c, u32 s, const u32* r, u64 rbx) {
+    using namespace Libraries::GnmDriver;
+    return TracedShader3<&sceGnmSetCsShader>(c, s, r, rbx);
+}
+extern "C" [[gnu::used, gnu::visibility("hidden")]] s32 PS4_SYSV_ABI
+BbTracedPsShader(u32* c, u32 s, const u32* r, u64 rbx) {
+    using namespace Libraries::GnmDriver;
+    return TracedShader3<&sceGnmSetPsShader>(c, s, r, rbx);
+}
+extern "C" [[gnu::used, gnu::visibility("hidden")]] s32 PS4_SYSV_ABI
+BbTracedVsShader(u32* c, u32 s, const u32* r, u32 m, u64 rbx) {
+    using namespace Libraries::GnmDriver;
+    return TracedVsShader(c, s, r, m, rbx);
+}
+extern "C" void BbGnmCsStub();
+extern "C" void BbGnmPsStub();
+extern "C" void BbGnmVsStub();
+// Three-argument setters: rbx goes in rcx; SetVsShader (four arguments): in r8.
+asm(R"(
+    .text
+    .globl _BbGnmCsStub
+    .private_extern _BbGnmCsStub
+    .globl _BbGnmPsStub
+    .private_extern _BbGnmPsStub
+    .globl _BbGnmVsStub
+    .private_extern _BbGnmVsStub
+    .p2align 4
+_BbGnmCsStub:
+    movq %rbx, %rcx
+    jmp _BbTracedCsShader
+    .p2align 4
+_BbGnmPsStub:
+    movq %rbx, %rcx
+    jmp _BbTracedPsShader
+    .p2align 4
+_BbGnmVsStub:
+    movq %rbx, %r8
+    jmp _BbTracedVsShader
+)");
+namespace Libraries::GnmDriver {
+namespace {
+template <>
+u64 TraceEntry<&sceGnmSetCsShader>() {
+    return reinterpret_cast<u64>(&BbGnmCsStub);
+}
+template <>
+u64 TraceEntry<&sceGnmSetPsShader>() {
+    return reinterpret_cast<u64>(&BbGnmPsStub);
+}
+template <>
+u64 TraceEntry<&sceGnmSetVsShader>() {
+    return reinterpret_cast<u64>(&BbGnmVsStub);
+}
+#endif
+} // namespace
+
 // bbport: register through TracedCall (CheckCommandBuffer reports which calls wrote a buffer).
 #undef LIB_FUNCTION
 #define LIB_FUNCTION(nid, lib, libversion, mod, function)                                          \
     do {                                                                                           \
         TracedCall<&function>::name = #function;                                                   \
         sym->AddSymbol(nid, lib, mod, Core::Loader::SymbolType::Function,                         \
-                       trace_calls ? reinterpret_cast<u64>(&TracedCall<&function>::Call)           \
+                       trace_calls ? TraceEntry<&function>()                                       \
                                    : reinterpret_cast<u64>(&function));                            \
     } while (0)
 

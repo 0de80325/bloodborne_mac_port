@@ -451,6 +451,46 @@ game process: a 506-word DCB whose last 448 words were never written (zeros), ri
 correct `sceGnmSetCsShader`. The command processor now skips type-0 packets as the hardware
 does (logged once per buffer); see MACOS_BACKLOG for what remains.
 
+### Load crash: root cause (2026-10-14 evening)
+
+Test loads of the same save gave very different rates: 9 of ~20 walks in the morning, 0 of
+~100 loads in the afternoon, then about 1 in 5 with 16 busy processes beside the game, and 6
+of 9 walk runs in the evening (no extra load). The lock trace (`BB_SYNC_TRACE=1`) did not hide it.
+
+What the game process recorded (Gnm call ring with each call's guest return chain, the
+caller's `rbx` = the Gnmx `CommandBuffer*`, and that context's owner field):
+
+- Each overlap is the same two threads: the main thread (not created by the game, so no
+  "is host thread" line) and `GXRenderThread`, both writing through context `0x70282a2850`,
+  whose owner is `GXRenderThread`'s `scePthreadSelf` handle. Calls alternate and the write
+  positions only grow (both append through one cmdptr); no chunk was handed out twice. A
+  check for GPU fence writes that free a chunk still in use (status 1) never fired.
+- The main thread's chain: `0x2168630` (dispatch on a context) ← `0xebb960` ← `0x2276501` ←
+  `0x22c4fcc` ← `0x22f8d9d`. `0xebb960` creates three render resources and clears them with
+  three compute dispatches on `*0x55406c8` → `+0x10` → `+8`: the engine's global immediate
+  context. No lock is held; no ownership check is on this path (the check at `0x26d6b52`
+  compares `scePthreadSelf()` with the owner at `+0xb718` on another path).
+- Timeline of one overlap (μs): `GXRenderThread` ends a frame and waits (+0); the main thread
+  wakes from its frame handoff wait (+3); `GXRenderThread` is silent 16 ms (vblank wait, not
+  traced); the main thread starts its load step (+8,600) and its three dispatches (+15,350 …
+  +15,440); `GXRenderThread` starts the next frame at +15,400, in the middle of them.
+
+So the game assumes the main thread's setup ends before the next vblank frame. Natively it is
+short; here it took ~7 ms, longer on a loaded Mac. Our primitives behaved correctly
+(`scePthreadSelf` handles are unique: thread records are never freed; mutex, rwlock,
+semaphore and condvar orders in the trace are consistent).
+
+Option A: the corrupted packets no longer end the GPU host (invalid types, unknown opcodes,
+bad EOP selects, early flip IRQ, copy shader with bad strides: skipped and logged). None of
+the evening runs lost the GPU host; the two full walks played on at 60 FPS. Option B
+(MACOS_BACKLOG): make the main thread's step and the render thread's next frame exclusive.
+
+Tools left in place: the Gnm check's report lists every library call into the bad buffer
+with thread, caller chain (fiber stacks too) and `CommandBuffer`; "Gnm: context X used by
+thread A, then B" (owned contexts only) shows overlaps even when the packets stay valid;
+`BB_SYNC_TRACE=1` merges lock calls into the report; guest threads log their host thread id
+and `scePthreadSelf` handle.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25

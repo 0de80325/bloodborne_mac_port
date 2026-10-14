@@ -28,6 +28,13 @@ uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
 void runtime_finalize(void *dso);
 uintptr_t runtime_mutex_resolve(const char *name);
+/* Synchronization trace for the Gnm check (load-crash hunt): called after each guest acquire
+ * and before each release of a mutex, rwlock or semaphore. Set by probe.c to the GPU library's
+ * recorder; NULL = off. */
+typedef void (*RuntimeSyncHook)(const char *op, uintptr_t object, int64_t result);
+extern RuntimeSyncHook runtime_sync_hook;
+#define RUNTIME_SYNC(op, object, result) do { RuntimeSyncHook sync_hook_ = runtime_sync_hook; \
+    if (sync_hook_) sync_hook_((op), (uintptr_t)(object), (int64_t)(result)); } while (0)
 void runtime_mutex_report(void);
 void runtime_mutex_dump_info(void *f, void *handle);
 uintptr_t runtime_memory_resolve(const char *name);

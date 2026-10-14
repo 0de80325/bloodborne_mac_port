@@ -54,6 +54,7 @@ static int native_cond_wait(NativeCond *c, NativeMutex *m, uint64_t deadline) {
 static int native_cond_signal(NativeCond *c) { return pthread_cond_signal(c); }
 static int native_cond_broadcast(NativeCond *c) { return pthread_cond_broadcast(c); }
 
+RuntimeSyncHook runtime_sync_hook;
 typedef struct { int type; } GuestAttr;
 typedef struct { NativeMutex native; } GuestMutex;
 static size_t created, locks, unlocks;
@@ -125,6 +126,7 @@ static ABI int32_t mutex_lock(GuestMutex **mutex) {
     e = orbis_error(native_lock(&(*mutex)->native));
     runtime_thread_clear_blocked();
     if (!e) ++locks;
+    RUNTIME_SYNC("mutex_lock", *mutex, e);
     return e;
 }
 static ABI int32_t mutex_trylock(GuestMutex **mutex) {
@@ -132,11 +134,13 @@ static ABI int32_t mutex_trylock(GuestMutex **mutex) {
     if (e) return e;
     e = orbis_error(native_trylock(&(*mutex)->native));
     if (!e) ++locks;
+    RUNTIME_SYNC("mutex_trylock", *mutex, e);
     return e;
 }
 static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     if (!mutex || (uintptr_t)*mutex == 2) return orbis_error(EINVAL);
     if ((uintptr_t)*mutex < 2) return orbis_error(EPERM);
+    RUNTIME_SYNC("mutex_unlock", *mutex, 0);
     int32_t e = orbis_error(native_unlock(&(*mutex)->native));
     if (!e) ++unlocks;
     return e;
@@ -157,6 +161,7 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
     e = timed_error(native_timedlock(&(*mutex)->native, deadline_after(usec)));
     runtime_thread_clear_blocked();
     if (!e) ++locks;
+    RUNTIME_SYNC("mutex_timedlock", *mutex, e);
     return e;
 }
 typedef struct { NativeCond native; } GuestCond;
@@ -196,9 +201,11 @@ static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
+    RUNTIME_SYNC("cond_wait:unlock", *mutex, 0);
     runtime_thread_set_blocked("condvar", (uintptr_t)cond);
     int32_t res = orbis_error(native_cond_wait(&(*cond)->native, &(*mutex)->native, 0));
     runtime_thread_clear_blocked();
+    RUNTIME_SYNC("cond_wait:lock", *mutex, res);
     return res;
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, uint64_t deadline) {
@@ -206,9 +213,11 @@ static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, uint64_t de
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
+    RUNTIME_SYNC("cond_timedwait:unlock", *mutex, 0);
     runtime_thread_set_blocked("condvar_timed", (uintptr_t)cond);
     int32_t res = timed_error(native_cond_wait(&(*cond)->native, &(*mutex)->native, deadline ? deadline : 1));
     runtime_thread_clear_blocked();
+    RUNTIME_SYNC("cond_timedwait:lock", *mutex, res);
     return res;
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {

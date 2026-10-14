@@ -71,6 +71,26 @@ Each item: what was done for now, what the refinement is, and where it lives.
   one at word 337 of the same buffer. Two threads were handed overlapping command-buffer space:
   look at how the game hands out command-buffer chunks to the cloth jobs (its "reserve failed"
   callback / chunk allocator) and which of our primitives guard it.
+  **Root cause found (2026-10-14 evening; FINDINGS "Load crash: root cause"): a race in the
+  game that our slower main thread exposes, not a broken primitive.** While a level loads, the
+  main thread's cloth/texture setup (eboot `0xebb960`, called from `0x2276501`) records three
+  compute dispatches straight into the engine's global immediate GX context (`*0x55406c8` →
+  `+0x10` → `+8`, the context `GXRenderThread` records into; owner field still
+  `GXRenderThread`), with no lock. `GXRenderThread` keeps drawing the loading screen at vblank
+  pace into the same context. The game counts on the main thread being done before the next
+  vblank frame starts: natively that work is short; under Rosetta it takes ~7 ms, and CPU load
+  stretches it, so the render thread's next frame starts in the middle of it and both append
+  through one `CommandBuffer`. Corrupted packets in 6 of 9 evening walk runs (no extra load);
+  other overlaps leave valid packets. **Option A (now):** every corrupted-stream path
+  seen so far is survivable: invalid PM4 types and unknown type-3 opcodes skip the rest of the
+  buffer, an EOP with a bad data/interrupt select is skipped, an early flip IRQ flips anyway,
+  a copy shader with inconsistent strides is skipped. The game played on in each test since.
+  Diagnostics: "Gnm: context X used by thread A, then B" names the overlap with the guest call
+  chain. **Option B:** make the two exclusive: hook the call at `0x2276501` (and the other
+  direct immediate-context users, if any) so the main thread waits until `GXRenderThread` is
+  between frames, and `GXRenderThread` waits for it before starting the next frame (a guest
+  call-site patch to a trampoline in low memory, with a timeout against deadlock). Still open:
+  the SIGSEGV in `Shader::StageSpecialization` on corrupted shader state (not seen since).
 - **Fixed 2026-10-14: `MapNumberConversion` UNREACHABLE (data_fmt 0, SnormNz) killed the GPU
   host during a level load** (1 in ~60 loads). A descriptor with that format reads as zeros on
   the GPU; it now logs once ("SnormNz descriptor with data format …") and converts nothing.
@@ -168,8 +188,8 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *Same day, test runs:* the load-time corrupted command buffer (cloth-thread entry above) also
   killed the host twice in ~14 test loads: `SignalFence: Unreachable code!` (pm4_cmds.h:492)
   after "Gnm check: bad packet", and a SIGSEGV in `Shader::StageSpecialization` building a
-  draw from corrupted shader state. Fixing the root cause covers these; until then both could
-  skip the draw/fence instead of ending the host.
+  draw from corrupted shader state. The fence (and the other corrupted-stream paths) are now
+  skipped; root cause in the cloth-thread entry above.
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -145,7 +147,6 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     const auto src_buf_sharp = info.buffers[1].GetSharp(info);
     const auto dst_buf_sharp = info.buffers[2].GetSharp(info);
     const auto buf_stride = src_buf_sharp.GetStride();
-    ASSERT(buf_stride == dst_buf_sharp.GetStride());
 
     struct CopyShaderControl {
         u32 dst_idx;
@@ -153,7 +154,19 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         u32 end;
     };
     static_assert(sizeof(CopyShaderControl) == 12);
-    ASSERT(ctl_buf_sharp.GetStride() == sizeof(CopyShaderControl));
+    // bbport: only a corrupted command buffer (load-time overlap, MACOS_BACKLOG) has these:
+    // skip the copy rather than end the GPU host.
+    if (buf_stride != dst_buf_sharp.GetStride() ||
+        ctl_buf_sharp.GetStride() != sizeof(CopyShaderControl)) {
+        static std::atomic<u32> reports{0};
+        if (reports.fetch_add(1, std::memory_order_relaxed) < 4) {
+            std::fprintf(stderr, "GPU: copy shader with inconsistent strides (source %u, "
+                                 "destination %u, control %u) skipped (corrupted state?)\n",
+                         u32(buf_stride), u32(dst_buf_sharp.GetStride()),
+                         u32(ctl_buf_sharp.GetStride()));
+        }
+        return true;
+    }
     const auto ctl_buf = reinterpret_cast<const CopyShaderControl*>(ctl_buf_sharp.base_address);
 
     static std::vector<vk::BufferCopy> copies;

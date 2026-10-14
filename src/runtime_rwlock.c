@@ -142,6 +142,7 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
     }
     prune_locked(r,h);
     host_unlock(&registry_lock);
+    RUNTIME_SYNC(writer ? "rwlock_wrlock" : "rwlock_rdlock", r, error(e));
     return error(e);
 }
 
@@ -160,6 +161,7 @@ static ABI int32_t rw_unlock(Rwlock **handle) {
     Holder *h=r->holders;
     while (h && !host_thread_equal(h->thread,host_thread_id())) h=h->next;
     if (!h || (!h->readers && !h->writer)) { host_unlock(&registry_lock); return error(EPERM); }
+    RUNTIME_SYNC(h->writer ? "rwlock_wrunlock" : "rwlock_rdunlock", r, 0);
     int e=native_unlock(&r->native,h->writer);
     if (!e) { if (h->writer) h->writer=0; else --h->readers; ++unlocks; }
     prune_locked(r,h);

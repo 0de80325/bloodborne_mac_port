@@ -1478,8 +1478,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             default:
-                UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
-                                static_cast<u32>(opcode), count);
+                // bbport: only a corrupted command buffer has these (load-time command buffer
+                // overlap, MACOS_BACKLOG): skip the rest of it rather than end the GPU host.
+                DumpBadPacket(dcb.data(), base_addr, dcb.size_bytes());
+                std::fprintf(stderr, "GPU: unknown PM4 opcode %#x (count %u) at offset %#llx: "
+                                     "rest of the command buffer (%zu bytes) skipped\n",
+                             static_cast<u32>(opcode), count,
+                             static_cast<unsigned long long>(
+                                 reinterpret_cast<uintptr_t>(dcb.data()) - base_addr),
+                             dcb.size_bytes());
+                dcb = dcb.last(0);
+                continue;
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;

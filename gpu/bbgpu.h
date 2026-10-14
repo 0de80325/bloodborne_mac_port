@@ -57,6 +57,8 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 int bbgpu_overlay_captures_input(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
+/* Records a guest synchronization call in the Gnm check's call ring (runtime_sync_hook). */
+void bbgpu_record_sync(const char *op, uintptr_t object, int64_t result);
 /* Flips and submissions query for heartbeat / diagnostics. */
 uint64_t bbgpu_get_flip_count(void);
 uint64_t bbgpu_get_submit_count(void);

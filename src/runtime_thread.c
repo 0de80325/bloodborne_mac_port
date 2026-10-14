@@ -134,6 +134,9 @@ void runtime_thread_attach_host(const char *name) {
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    uint64_t tid=0;
+    pthread_threadid_np(NULL,&tid);
+    printf("Runtime: guest thread 'main' is host thread %llu, handle %p\n",(unsigned long long)tid,(void *)t);
 }
 
 void *runtime_thread_get_tcb(void) {
@@ -264,6 +267,10 @@ static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+    uint64_t tid=0;
+    pthread_threadid_np(NULL,&tid);
+    printf("Runtime: guest thread '%s' is host thread %llu, handle %p (affinity %#llx, prio %d)\n",
+           t->name,(unsigned long long)tid,(void *)t,(unsigned long long)t->attr.affinity,t->attr.prio);
     if (!EXIT_SET(t->exit_jump)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     host_lock(&lock); t->finished=1; ++exited; host_unlock(&lock);
@@ -354,6 +361,8 @@ static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
 
 static ABI int32_t thread_set_affinity(GuestThread *t,uint64_t mask) {
     if (!find_thread(t)) return ERR(3);
+    if (t->attr.affinity!=mask)
+        printf("Runtime: guest thread '%s' affinity %#llx\n",t->name,(unsigned long long)mask);
     t->attr.affinity=mask; return 0;
 }
 static ABI int32_t thread_get_affinity(GuestThread *t,uint64_t *mask) {

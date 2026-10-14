@@ -118,9 +118,14 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
     return result;
 }
 
-static ABI int32_t sem_wait(uint32_t id,int32_t need,uint32_t *timeout) { return wait_count(id,need,timeout,1); }
-static ABI int32_t sem_poll(uint32_t id,int32_t need) { return wait_count(id,need,NULL,0); }
+static ABI int32_t sem_wait(uint32_t id,int32_t need,uint32_t *timeout) {
+    int32_t r=wait_count(id,need,timeout,1); RUNTIME_SYNC("sema_wait",id,r); return r;
+}
+static ABI int32_t sem_poll(uint32_t id,int32_t need) {
+    int32_t r=wait_count(id,need,NULL,0); RUNTIME_SYNC("sema_poll",id,r); return r;
+}
 static ABI int32_t sem_signal(uint32_t id,int32_t count) {
+    RUNTIME_SYNC("sema_signal",id,count);
     host_lock(&lock);
     Sema *s=find(id);
     int32_t result=0;

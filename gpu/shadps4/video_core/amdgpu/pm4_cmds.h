@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <cstring>
 #include <type_traits>
 #include "common/assert.h"
@@ -489,7 +490,11 @@ struct PM4CmdEventWriteEop {
             break;
         }
         default: {
-            UNREACHABLE();
+            // bbport: only a corrupted packet has this (load-time command buffer overlap,
+            // MACOS_BACKLOG): no write, rather than ending the GPU host.
+            std::fprintf(stderr, "PM4: EOP fence with data select %u skipped (corrupted packet?)\n",
+                         u32(data_sel.Value()));
+            return;
         }
         }
 
@@ -499,14 +504,14 @@ struct PM4CmdEventWriteEop {
             break;
         }
         case InterruptSelect::IrqOnly:
-            ASSERT(data_sel == DataSelect::None);
-            [[fallthrough]];
         case InterruptSelect::IrqWhenWriteConfirm: {
             signal_irq();
             break;
         }
         default: {
-            UNREACHABLE();
+            std::fprintf(stderr, "PM4: EOP fence with interrupt select %u skipped\n",
+                         u32(int_sel.Value()));
+            break;
         }
         }
     }

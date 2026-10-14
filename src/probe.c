@@ -783,6 +783,8 @@ int main(int argc, char **argv) {
         } else
 #endif
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
+        /* BB_SYNC_TRACE=1: lock calls in the Gnm check's report (load-crash hunt). */
+        if (getenv("BB_SYNC_TRACE") && getenv("BB_SYNC_TRACE")[0]=='1') runtime_sync_hook = bbgpu_record_sync;
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
     }
     image_size = size;
