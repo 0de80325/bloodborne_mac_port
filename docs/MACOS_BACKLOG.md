@@ -177,6 +177,14 @@ Each item: what was done for now, what the refinement is, and where it lives.
   confirmed as the cause: 6 warm-cache reloads at the Hunter's Dream lamp showed legs every
   time and no bounced read. *Next:* if legs go missing again, check the log for that line
   (present = this race; absent = look at the draw side as above).
+  *2026-10-14, night (user session, mac-v0.3.0):* **floor missing** in a Yharnam (m24/m27)
+  scene. The log has no bounced read, but the main-thread/GXRenderThread load race (Stability
+  entry above) hit at **both** loads of the session: at the first load a corrupted packet made the
+  host skip the rest of a 796-byte command buffer, and at the load into this scene the main
+  thread's setup step (…ebbca9/…216aa95 chains) shared the immediate context with the render
+  thread for 2.9 ms. Skipped or interleaved setup dispatches would leave whatever they produce
+  wrong until the next load, which fits "missing until a relaunch". *Next:* Option B of the
+  load race (serialize the two threads), then see whether missing geometry still occurs.
 - **GPU host crash in `Scheduler::KickRecording` (2026-10-14, user session).** SIGSEGV at
   address 0x20008 (a null `record_chunk`: its size field follows the 128 KiB buffer) on the draw
   recording thread, `RunWriteData` → `WaitHostCopies` → `KickRecording`, right after an area
