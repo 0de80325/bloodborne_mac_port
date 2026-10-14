@@ -17,6 +17,8 @@ process.
 
 ## Status (2026-10-14)
 
+**Current version: [mac-v0.3.0](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases/tag/mac-v0.3.0)** (source only; build it as below).
+
 **Work in progress, playable.** On an Apple M4 Max the game boots, character creation works,
 saves load, and Central Yharnam runs at a **locked 60 FPS** at 1080p — natively or with MetalFX
 upscaling. Expect occasional rendering glitches (see [Known issues](#known-issues)).
