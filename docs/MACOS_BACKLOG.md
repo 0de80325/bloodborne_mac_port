@@ -142,6 +142,23 @@ Each item: what was done for now, what the refinement is, and where it lives.
   mode, so not draws skipped while compiling. *Next:* scripted die/respawn or reload cycles
   with screenshots; at a hit, compare the host's copy of the missing draw's vertex/index data
   with the game's memory (stale mirror or buffer cache vs. a rejected pipeline).
+  *2026-10-14, later:* the user saw legs missing again (screenshot: torso, arms and straps drawn,
+  legs and lower body absent). Candidate cause found and fixed: a game file read into memory
+  the GPU tracks can race the protect relay (bb:GpuProtect re-protects a page between
+  `touch_for_write` and `read()`); macOS then fails the whole read with EFAULT (verified: −1,
+  file offset still advanced), which the game would treat as a failed asset load. Such reads
+  are now redone through a bounce buffer and logged ("redone via bounce buffer"). Not yet
+  confirmed as the cause: 6 warm-cache reloads at the Hunter's Dream lamp showed legs every
+  time and no bounced read. *Next:* if legs go missing again, check the log for that line
+  (present = this race; absent = look at the draw side as above).
+- **GPU host crash in `Scheduler::KickRecording` (2026-10-14, user session).** SIGSEGV at
+  address 0x20008 (a null `record_chunk`: its size field follows the 128 KiB buffer) on the draw
+  recording thread, `RunWriteData` → `WaitHostCopies` → `KickRecording`, right after an area
+  load (cloth threads created). Another thread must have used the scheduler's recording chunk
+  while the draw pipe ran (a missing `DrainDrawPipe`). The scheduler now reports overlapping
+  chunk users ("two threads use the recording chunk at once", with both callers and a
+  backtrace). Not reproduced in 6 reloads. *Next:* read that report from the next crash, add
+  the missing drain there.
 - **Timed mutex/rwlock waits** (`runtime_mutex.c`, `runtime_rwlock.c`) are trylock + backoff:
   up to ~1 ms late, not fair; error-checking mutexes return `ETIMEDOUT` instead of `EDEADLK`
   on self-relock. *Refinement:* condvar-based timed locks.

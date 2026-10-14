@@ -758,6 +758,7 @@ public:
             func(current_cmdbuf);
             return;
         }
+        const ChunkGuard guard{*this, __builtin_return_address(0)};
         if (!record_chunk->Push(std::forward<Func>(func))) {
             full_chunks.push_back(std::move(record_chunk));
             record_chunk = AcquireChunk();
@@ -779,6 +780,7 @@ public:
             return;
         }
         ASSERT(bytes + 1024 <= RecordChunk::Capacity);
+        const ChunkGuard guard{*this, __builtin_return_address(0)};
         if (RecordChunk::Capacity - record_chunk->Size() < bytes + 1024) {
             full_chunks.push_back(std::move(record_chunk));
             record_chunk = AcquireChunk();
@@ -933,6 +935,22 @@ private:
     RenderState render_state;
     bool is_rendering = false;
     // bbport: threaded recording
+    /// The chunk being filled belongs to one thread at a time (the GPU command thread, or the
+    /// draw recording thread while it runs). ChunkGuard reports overlapping users, e.g. a
+    /// missing DrawPipe drain, which otherwise corrupt the chunk or crash on a null one.
+    std::atomic<void*> chunk_user{nullptr};
+    static void ReportChunkRace(void* other, void* caller);
+    struct ChunkGuard {
+        Scheduler& s;
+        ChunkGuard(Scheduler& s_, void* caller) : s{s_} {
+            if (void* other = s.chunk_user.exchange(caller, std::memory_order_acquire)) {
+                ReportChunkRace(other, caller);
+            }
+        }
+        ~ChunkGuard() {
+            s.chunk_user.store(nullptr, std::memory_order_release);
+        }
+    };
     std::unique_ptr<RecordChunk> record_chunk;
     std::vector<std::unique_ptr<RecordChunk>> full_chunks;
     std::mutex recorder_mutex;

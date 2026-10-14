@@ -237,11 +237,38 @@ static void touch_for_write(void *buffer,uint64_t size) {
         *b=*b;
     }
 }
+/* touch_for_write cannot close the window: the GPU can protect a touched page again before the
+ * kernel copies into it (bb:GpuProtect applies the host's requests at any time), and read()
+ * then fails with EFAULT. The game treats that as a failed load (missing meshes after a
+ * respawn), so such a read is redone through a bounce buffer, whose memcpy into guest memory
+ * goes through the fault handler like any guest write. offset<0: read at the file position. */
+static size_t efault_retries;
+static int64_t read_bounced(int h,void *buffer,uint64_t size,int64_t offset) {
+    if (offset<0 && (offset=lseek(h,0,SEEK_CUR))<0) return -errno;
+    char *bounce=malloc(size ? size : 1);
+    if (!bounce) return -ENOMEM;
+    ssize_t n=pread(h,bounce,size,offset);
+    int e=errno;
+    if (n>0) memcpy(buffer,bounce,(size_t)n);
+    free(bounce);
+    if (n<0) return -e;
+    size_t retries=__atomic_add_fetch(&efault_retries,1,__ATOMIC_RELAXED);
+    if (retries<=20 || !(retries & (retries-1)))
+        printf("Runtime: file read into GPU-protected memory at %p (%llu bytes) redone via bounce buffer (#%zu)\n",
+               buffer,(unsigned long long)size,retries);
+    return n;
+}
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    off_t start=lseek(h,0,SEEK_CUR);
     touch_for_write(buffer,size);
     ssize_t n=read(h,buffer,size);
+    if (n<0 && errno==EFAULT && start>=0) {
+        n=read_bounced(h,buffer,size,start);
+        if (n>=0) lseek(h,start+n,SEEK_SET);
+        else { errno=(int)-n; n=-1; }
+    }
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
     __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
     return n;
@@ -251,6 +278,10 @@ static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     if (h<0) return -EBADF;
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
+    if (n<0 && errno==EFAULT && offset>=0) {
+        n=read_bounced(h,buffer,size,offset);
+        if (n<0) { errno=(int)-n; n=-1; }
+    }
     if (n<0) {
         int e = errno;
         if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,e);
@@ -431,6 +462,6 @@ int64_t runtime_file_fstat(int fd,void *s) { return do_fstat(fd,s); }
 int64_t runtime_file_getdents(int fd,char *b,uint64_t n,int64_t *base) { return do_getdents(fd,b,n,base); }
 int runtime_file_translate(const char *guest,char *out,size_t size) { return translate(guest,out,size); }
 void runtime_file_report(void) {
-    printf("Runtime: files opened=%zu, reads=%zu (%llu bytes), writes=%zu, not found=%zu\n",
-           opens,reads,(unsigned long long)bytes_read,writes,missing);
+    printf("Runtime: files opened=%zu, reads=%zu (%llu bytes), writes=%zu, not found=%zu, EFAULT reads redone=%zu\n",
+           opens,reads,(unsigned long long)bytes_read,writes,missing,efault_retries);
 }

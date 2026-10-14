@@ -10,8 +10,11 @@
 #include <string>
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <execinfo.h>
+#include <pthread.h>
 #endif
 #include <functional>
+#include <fmt/format.h>
 
 #include "bbport_copy.h"
 #include "bbport_cpu.h"
@@ -376,10 +379,42 @@ void Scheduler::WaitHostCopies() {
     BbCopy::WaitAsync();
 }
 
+void Scheduler::ReportChunkRace(void* other, void* caller) {
+    static std::atomic<u32> reports{0};
+    const u32 n = reports.fetch_add(1, std::memory_order_relaxed);
+    if (n >= 8) {
+        return;
+    }
+    const auto name = [](void* address) -> std::string {
+        Dl_info info{};
+        if (dladdr(address, &info) && info.dli_sname) {
+            return fmt::format("{}+{:#x}", info.dli_sname,
+                               reinterpret_cast<uintptr_t>(address) -
+                                   reinterpret_cast<uintptr_t>(info.dli_saddr));
+        }
+        if (info.dli_fbase) {
+            return fmt::format("{:#x} in lib", reinterpret_cast<uintptr_t>(address) -
+                                                   reinterpret_cast<uintptr_t>(info.dli_fbase));
+        }
+        return fmt::format("{}", address);
+    };
+    char thread[64] = "?";
+    pthread_getname_np(pthread_self(), thread, sizeof(thread));
+    std::fprintf(stderr,
+                 "Scheduler: two threads use the recording chunk at once (#%u): %s from %s, "
+                 "while another thread entered from %s\n",
+                 n + 1, thread, name(caller).c_str(), name(other).c_str());
+    void* frames[32];
+    const int count = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, count, 2);
+    std::fflush(stderr);
+}
+
 void Scheduler::KickRecording(bool force) {
     if (!recorder_thread.joinable()) {
         return;
     }
+    const ChunkGuard guard{*this, __builtin_return_address(0)};
     // Callers kick where nobody holds the raw command buffer: deferral resumes.
     direct_mode = false;
     // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
