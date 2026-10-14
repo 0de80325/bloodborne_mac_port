@@ -37,3 +37,4 @@ test_th.*
 
 # M0 spike build output
 tools/m0_spike/*/out/
+launch.conf

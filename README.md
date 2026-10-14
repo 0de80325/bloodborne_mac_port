@@ -15,11 +15,11 @@ process.
 > This project is not affiliated with or endorsed by Sony Interactive Entertainment,
 > FromSoftware, or AMD.
 
-## Status (2026-10-13)
+## Status (2026-10-14)
 
 **Work in progress, playable.** On an Apple M4 Max the game boots, character creation works,
 saves load, and Central Yharnam runs at a **locked 60 FPS** at 1080p — natively or with MetalFX
-upscaling. Expect occasional rendering glitches and crashes (see the backlog).
+upscaling. Expect occasional rendering glitches (see [Known issues](#known-issues)).
 
 The target is a locked 60 FPS (the game's physics run at 30 Hz, so more is not wanted), at the
 highest resolution each Mac allows. Measured on the M4 Max, frame rate uncapped:
@@ -54,15 +54,45 @@ got it to 60, roughly in order:
 Also fixed along the way: a MoltenVK crash from two threads sharing one command pool, and
 geometry corruption at 1440p (scenes above 1080p now use live resolution changes).
 
+### Latest changes (2026-10-14)
+
+- **Load crash found and defused.** The intermittent crash while loading an area (the GPU
+  window closing during a loading screen) is a race in the game itself: the main thread
+  records cloth/texture compute jobs into the render thread's command stream without a lock,
+  and the render thread's next loading-screen frame starts in the middle of them. On a PS4 the
+  main thread is done before the next vsync; under Rosetta it can take ~7 ms longer, more when
+  the Mac is busy. The GPU process now logs and skips the corrupted commands instead of
+  exiting: in tests where the race hit 6 times in 9 runs, nothing crashed. The proper fix
+  (making the two threads take turns) is in the backlog.
+- **Full screen works** (⌃⌘F or the green window button). It used to freeze the picture.
+- **Lower display latency:** two swapchain images instead of three, so the time from the
+  game presenting a frame to it reaching the screen went from 48.5 to 31.7 ms.
+- **Game file reads no longer fail** when they land in memory the GPU is watching. macOS
+  failed such reads outright, so the game could lose an asset load; a possible cause of the
+  missing-geometry reports below.
+- **Shader compile mode `balanced`** is the default: new shaders compile in the background
+  and a frame waits at most 6 ms for them, so new areas no longer freeze for 100+ ms.
+- **Diagnostics:** `BB_FRAME_STATS=1` prints per-stage timings of every late frame ("Spike"
+  lines), and corrupted GPU command streams are reported with the game threads and code
+  involved.
+
+### Known issues
+
+- **Missing geometry after a respawn or reload** (character's legs, a flight of stairs),
+  reported on an M4 Max and an M2 Pro. A relaunch brings it back. If you see it, the log
+  lines around the respawn help.
+- **Occasional judder at a steady 60 FPS** (some game frames take 20–45 ms).
+- Full screen renders at point size rather than full Retina resolution.
+- During loads, the game race above can still briefly garble a loading-screen frame.
+
 ### What's next
 
 - **Fewer Metal render passes.** Profiling found ~408 Metal encoders per frame (190 render
   passes). Each extra render pass costs ~13–16 µs of GPU time on Apple GPUs regardless of
   resolution — about 3 ms per frame — and leaves the GPU idle in periodic gaps. Merging passes
   is the main lever for 1440p and 4K at 60.
-- Remaining stability issues: an intermittent "PM4 type 0" crash while loading, and a
-  self-closing window (both instrumented).
-- A launcher and a `.app` bundle.
+- The proper fix for the load race, and the missing-geometry hunt.
+- A `.app` bundle (for now, `Bloodborne.command` launches from Finder; see below).
 
 Details:
 - Plan, design decisions and porting checklist: [docs/MACOS_PORT.md](docs/MACOS_PORT.md)
@@ -102,29 +132,74 @@ Details:
 - **Your own decrypted game dump**: a `CUSA03173` folder (v1.09) containing `eboot.bin`,
   `sce_sys/`, `sce_module/` and `dvdroot_ps4/`. `python3 scripts/game_check.py` verifies it.
 
-## Quick start
+## Building
 
 ```sh
 git clone --recursive https://github.com/Wooloomooloo2/bloodborne_mac_port.git
 cd bloodborne_mac_port
 
 # 1. Build pinned dependencies (SDL3, Vulkan loader, FFmpeg, ...) and MoltenVK into deps/:
-#    x86-64 for the game process, arm64 for the native GPU host
+#    x86-64 for the game process, arm64 for the native GPU host (once)
 bash scripts/macos/bootstrap_deps.sh
 BB_DEPS_ARCH=arm64 bash scripts/macos/bootstrap_deps.sh
 
 # 2. Build the loader, the GPU library and the GPU host
 #    (out/bb-probe, out/gpu/libbbgpu.dylib, out/bbgpu-host)
 bash build_macos.sh
-
-# 3. Prepare the game image and launch (rebuilds if needed)
-BB_GAME_DIR=/path/to/CUSA03173 bash run.sh
 ```
 
-`run.sh` points the Vulkan loader at the bundled MoltenVK ICD automatically. Saves and shader
-caches go to `user/`, settings to `bbport.ini` (also editable in the in-game menu, `⌘,`). The
-first launch, and the first visit to each area, compiles shaders; later sessions load them at
-start.
+Launching rebuilds whatever changed, so after a `git pull` you can simply launch again.
+
+## Launching
+
+### From Finder
+
+Double-click **`Bloodborne.command`** in the repository folder. It opens a Terminal window and
+starts the game.
+
+- **First launch:** it asks for your game folder (the `CUSA03173` folder containing
+  `eboot.bin`) and remembers it in `launch.conf` next to it. If the game folder sits next to the
+  repository (`../CUSA03173`), it is found without asking.
+- **Keep the Terminal window open** while you play: closing it ends the game. The game's log
+  appears there, and if the game exits with an error the window stays open so you can read it.
+- macOS may ask you to allow Terminal to access the folder the game is in (Desktop, Documents,
+  an external drive): allow it.
+- To put it in the Dock or on the Desktop, ⌥⌘-drag `Bloodborne.command` there to make an alias.
+- If macOS refuses to open it ("cannot be opened because it is from an unidentified
+  developer"; this happens if the repository was downloaded as a zip rather than cloned),
+  right-click it, choose **Open**, then **Open** again. If it says you lack permission, run
+  `chmod +x Bloodborne.command` once.
+
+`launch.conf` holds shell assignments and is not committed. Besides the game folder it can set
+where saves, shader caches and settings live (default: the repository folder), and any other
+`run.sh` variable:
+
+```sh
+BB_GAME_DIR=/Users/you/Bloodborne/CUSA03173
+BB_DATA_DIR=/Users/you/Developer/GitHub/bloodborne_mac_port/out/macdata
+```
+
+### From Terminal
+
+```sh
+cd bloodborne_mac_port
+BB_GAME_DIR=/path/to/CUSA03173 bash run.sh
+# optional: BB_DATA_DIR=/path/to/data for saves, caches and bbport.ini elsewhere
+```
+
+`run.sh` prepares the game image, rebuilds anything whose sources changed, and points the
+Vulkan loader at the bundled MoltenVK. Saves and shader caches go to `user/` under the data
+folder, settings to `bbport.ini` there.
+
+### In the game
+
+- **Settings overlay:** `⌘,` (or L3 + R3 on a controller): FPS, resolution, upscaler (MetalFX,
+  FSR 3.1 or off), shader compile mode. Some changes need a restart.
+- **Full screen:** ⌃⌘F or the green window button.
+- **Input:** game controllers (through SDL) and the keyboard.
+- **First launch and new areas** compile shaders, so the first minutes stutter a little; later
+  sessions load them from the cache at start. The first launch after a rebuild takes ~20 s to
+  open the window.
 
 ## Repository layout
 
@@ -135,6 +210,7 @@ start.
 | `host/` | Native arm64 GPU host process (`bbgpu-host`) and the shared rings |
 | `scripts/` | Eboot preparation, linking, patch compiler (`patches.py`); `scripts/macos/` dependency bootstrap |
 | `patches/` | Community XML patches for Bloodborne 1.09 |
+| `Bloodborne.command` | Finder launcher (runs `run.sh` in Terminal) |
 | `launcher/` | GTK launcher from the Linux port (Linux reference path) |
 | `tools/` | Developer utilities, including `pkg_extract` (fpkg unpacker) |
 | `docs/` | macOS plan and backlog, plus technical notes inherited from upstream |
