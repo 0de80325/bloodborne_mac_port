@@ -106,6 +106,14 @@ public:
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);
+#ifdef __APPLE__
+    /// Zero-copy import serving a bind straight from pool pages (zerocopy.cpp),
+    /// or {nullptr, 0} (arena fallback). Drops stale resident BDA coverage and
+    /// refills it from the import.
+    std::pair<const Buffer*, u64> ObtainImported(VAddr addr, u32 size);
+    /// Forgets resident BDA coverage of [addr, addr+size) (remap/evict).
+    void DropResident(VAddr addr, u64 size);
+#endif
 
     /// Return true when a region is modified from the CPU
     [[nodiscard]] bool IsRegionCpuModified(VAddr addr, size_t size);
@@ -139,14 +147,6 @@ private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
-#ifdef __APPLE__
-    /// Zero-copy import serving a bind straight from pool pages (zerocopy.cpp),
-    /// or {nullptr, 0} (arena fallback). Drops stale resident BDA coverage and
-    /// refills it from the import.
-    std::pair<const Buffer*, u64> ObtainImported(VAddr addr, u32 size);
-    /// Forgets resident BDA coverage of [addr, addr+size) (remap/evict).
-    void DropResident(VAddr addr, u64 size);
-#endif
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 

@@ -5,6 +5,7 @@
 
 #include "video_core/buffer_cache/zerocopy.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +19,8 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
-extern "C" bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out);
+extern "C" bool host_view_span(uint64_t start, uint64_t end, uint64_t* phys_out,
+                               uint64_t* view_start_out, uint64_t* view_end_out);
 
 namespace VideoCore {
 namespace {
@@ -56,32 +58,48 @@ ZeroCopy::ZeroCopy(const Vulkan::Instance& instance_, Vulkan::Scheduler& schedul
     : instance{instance_}, scheduler{scheduler_} {}
 
 const Buffer* ZeroCopy::Obtain(BufferCache* owner, VAddr addr, u32 size, bool* fresh_out) {
-    (void)owner;
     if (fresh_out) {
         *fresh_out = false;
     }
-    if (!ZeroCopyWanted() || !BbSplit::Host() || size == 0) {
+    if (!ZeroCopyWanted() || !BbSplit::Host() || !size || !owner) {
         return nullptr;
     }
-    const u64 start = addr & ~(kPage - 1);
-    const u64 end = (u64(addr) + size + kPage - 1) & ~(kPage - 1);
-    if (end <= start || end - start > kMaxImport) {
-        return nullptr;
-    }
-    u64 phys = 0;
-    if (!host_view_phys(start, end, &phys)) {
+    u64 phys = 0, vs = 0, ve = 0;
+    if (!host_view_span(addr, u64(addr) + size, &phys, &vs, &ve)) {
         ++fallbacks;
+        static bool logged = false;
+        LogOnce(logged, "no single view covers 0x%llx+0x%x (arena fallback)",
+                (unsigned long long)addr, size);
         return nullptr;
     }
+    // Import the view-clipped aligned range: padding outside the view is never
+    // bound (descriptors stay within the request), and clipping keeps imports
+    // shared across requests in the same view.
+    const u64 istart = std::max<u64>(addr & ~(kPage - 1), vs);
+    const u64 iend = std::min<u64>((u64(addr) + size + kPage - 1) & ~(kPage - 1), ve);
+    if (iend <= istart || iend - istart > kMaxImport) {
+        return nullptr;
+    }
+    const u64 iphys = phys - (addr - istart); // istart <= addr, same view: contiguous
     std::scoped_lock lock{mutex};
     SweepRetired();
-    const auto key = std::make_pair(start, end - start);
-    if (const auto it = index.find(key); it != index.end() && it->second->phys == phys) {
+    const auto key = std::make_pair(istart, iend - istart);
+    if (const auto it = index.find(key);
+        it != index.end() && it->second->phys == iphys && it->second->addr == istart) {
         ++hits;
         lru.splice(lru.begin(), lru, it->second);
         return &it->second->buffer;
     }
-    const Buffer* imported = Import(addr, size, phys);
+    // Containment: an overlapping import of the same pages serves as well.
+    for (const auto& [k, lit] : index) {
+        const u64 s = lit->addr, e = s + lit->size;
+        if (s <= istart && iend <= e && lit->phys + (istart - s) == iphys) {
+            ++hits;
+            lru.splice(lru.begin(), lru, lit);
+            return &lit->buffer;
+        }
+    }
+    const Buffer* imported = Import(owner, istart, iend - istart, iphys);
     if (!imported) {
         ++fallbacks;
     } else if (fresh_out) {
@@ -90,9 +108,8 @@ const Buffer* ZeroCopy::Obtain(BufferCache* owner, VAddr addr, u32 size, bool* f
     return imported;
 }
 
-const Buffer* ZeroCopy::Import(VAddr addr, u32 size, u64 phys) {
-    const u64 start = addr & ~(kPage - 1);
-    const u64 span = ((u64(addr) + size + kPage - 1) & ~(kPage - 1)) - start;
+const Buffer* ZeroCopy::Import(BufferCache* owner, VAddr addr, u64 span, u64 phys) {
+    const u64 start = addr;
     const vk::Device dev = instance.GetDevice();
 
     vk::BufferCreateInfo bci;
@@ -161,13 +178,13 @@ const Buffer* ZeroCopy::Import(VAddr addr, u32 size, u64 phys) {
     entry.buffer.buffer.bda_addr = bda;
     entry.buffer.buffer.imported_memory = mem;
 
-    EvictOverlap(start, span);
+    EvictOverlap(owner, start, span, phys);
     lru.push_front(std::move(entry));
     auto it = lru.begin();
     index[{start, span}] = it;
     bytes += span;
     ++imports;
-    EnforceCaps();
+    EnforceCaps(owner);
     static bool logged = false;
     LogOnce(logged, "importing pool range 0x%llx+0x%llx (import #%llu)",
             (unsigned long long)start, (unsigned long long)span,
@@ -175,16 +192,21 @@ const Buffer* ZeroCopy::Import(VAddr addr, u32 size, u64 phys) {
     return &it->buffer;
 }
 
-void ZeroCopy::EvictOverlap(VAddr addr, u64 size) {
+void ZeroCopy::EvictOverlap(BufferCache* owner, VAddr addr, u64 size, u64 phys) {
     const u64 end = addr + size;
     for (auto it = index.begin(); it != index.end();) {
         const u64 s = it->first.first, e = s + it->first.second;
-        if (s < end && addr < e) {
-            Retire(it->second);
-            it = index.erase(it);
-        } else {
+        const u64 ostart = std::max<u64>(s, addr), oend = std::min<u64>(e, end);
+        // Disjoint, or the same pages (same phys chain: both imports read the
+        // same shared bytes): keep. Only a remap conflicts.
+        if (ostart >= oend ||
+            it->second->phys + (ostart - it->second->addr) == phys + (ostart - addr)) {
             ++it;
+            continue;
         }
+        owner->DropResident(s, e - s);
+        Retire(it->second);
+        it = index.erase(it);
     }
 }
 
@@ -226,10 +248,11 @@ void ZeroCopy::SweepRetired() {
     }
 }
 
-void ZeroCopy::EnforceCaps() {
+void ZeroCopy::EnforceCaps(BufferCache* owner) {
     while ((lru.size() > kMaxEntries || bytes > kMaxBytes) && !lru.empty()) {
         auto it = std::prev(lru.end());
         index.erase(it->key);
+        owner->DropResident(it->addr, it->size);
         Retire(it);
     }
 }

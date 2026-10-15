@@ -41,7 +41,6 @@ public:
     /// must not destroy it. Evicted entries are retired until the GPU is done.
     /// fresh_out (when non-null) reports a new import needing BDA coverage.
     const Buffer* Obtain(BufferCache* owner, VAddr addr, u32 size, bool* fresh_out = nullptr);
-
     u64 imported_bytes() const {
         return bytes;
     }
@@ -53,11 +52,11 @@ private:
         u64 addr = 0, size = 0, phys = 0;
     };
 
-    const Buffer* Import(VAddr addr, u32 size, u64 phys);
-    void EvictOverlap(VAddr addr, u64 size);
+    const Buffer* Import(BufferCache* owner, VAddr addr, u64 span, u64 phys);
+    void EvictOverlap(BufferCache* owner, VAddr addr, u64 size, u64 phys);
     void Retire(std::list<Entry>::iterator it);
     void SweepRetired();
-    void EnforceCaps();
+    void EnforceCaps(BufferCache* owner);
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;

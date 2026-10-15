@@ -423,9 +423,12 @@ void gpu_process_start(void) {
 /* Zero-copy buffer import (gpu/.../buffer_cache/zerocopy.cpp) needs the pool
  * offset of a mirrored range; only the native host tracks views. Single
  * process (and bb-probe itself) has no view table: always miss, arena path. */
-bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out) {
+bool host_view_span(uint64_t start, uint64_t end, uint64_t* phys_out, uint64_t* view_start_out,
+                    uint64_t* view_end_out) {
     (void)start;
     (void)end;
     (void)phys_out;
+    (void)view_start_out;
+    (void)view_end_out;
     return false;
 }

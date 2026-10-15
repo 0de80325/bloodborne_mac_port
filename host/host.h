@@ -25,7 +25,8 @@ void host_view_stats(uint64_t *count, uint64_t *bytes, uint64_t *applied, uint64
 uint64_t host_reservation_end(void);
 
 /* Zero-copy (buffer_cache/zerocopy.cpp): pool offset of the single mirror view
- * fully covering [start, end), or UINT64_MAX (no view, several views, or the
- * range is not covered). The caller revalidates on every use; entries keyed by
- * it stay correct without unmap wiring. */
-bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out);
+ * fully covering [start, end), plus that view's bounds, or false (no view,
+ * several views, or the range is not covered). The caller revalidates on every
+ * use; entries keyed by it stay correct without unmap wiring. */
+bool host_view_span(uint64_t start, uint64_t end, uint64_t* phys_out, uint64_t* view_start_out,
+                    uint64_t* view_end_out);
