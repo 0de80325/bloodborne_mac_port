@@ -578,6 +578,20 @@ with encoder-boundary logging, or `MTL_DEBUG_LAYER` + `MTLCaptureManager` on one
 split mode avoids the old capture crash), and whether the tessellated draw's control stage
 waits for something the previous encoder only signals at its very end.
 
+### Stability run and a measurement caveat (2026-10-15, 01:43–02:34)
+
+20 consecutive walks (title → load → Hunter's Dream walk) on master with the load lock,
+prefilled command buffers, Retina and the settings autosave: **20/20 clean** (no corrupted
+command buffers, no host loss, 60.0 FPS, worst frame 16.7 ms in the windows checked, 0.4–0.6
+late game frames per 5 s, screenshots correct).
+
+Caveat: in these runs the GPU command thread needed **6–7 µs per draw** and the recorder was busy
+~4.7 ms per frame, against **19–21 µs and ~15.8 ms** for the same build, route and settings a few
+hours earlier; the context lock never had to wait (5 of 9 loads before). The Mac was on mains
+in High Power mode throughout; the power log shows the display going to sleep around 01:57.
+Cause not found (display asleep, background work earlier such as indexing, CPU scheduling).
+So compare variants only back to back in one session, as the A/B runs above did.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25
