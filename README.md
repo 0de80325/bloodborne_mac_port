@@ -99,8 +99,7 @@ geometry corruption at 1440p (scenes above 1080p now use live resolution changes
   resolution — about 3 ms per frame — and leaves the GPU idle in periodic gaps. Merging passes
   is the main lever for 1440p and 4K at 60.
 - Confirm the missing-geometry reports are gone; the frame-time judder.
-- A signed, self-contained app that does not need the repository (today's `Bloodborne.app` is a
-  launcher for your checkout).
+- Signing and notarisation of the downloadable app (today it must be released from quarantine).
 
 Details:
 - Plan, design decisions and porting checklist: [docs/MACOS_PORT.md](docs/MACOS_PORT.md)
@@ -129,7 +128,35 @@ Details:
   temporal upscaling (FSR 3.1), a two-stage multi-threaded draw pipeline, and an in-game
   settings overlay (`⌘,` or `L3 + R3`).
 
-## Requirements
+## Download (no building needed)
+
+Ready-made builds are attached to the [releases](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases)
+as `Bloodborne-macOS-<version>.zip` (about 50 MB). You still need **your own game dump** (see
+below): no game files are included.
+
+1. Unzip it and move **`Bloodborne.app`** to Applications (or anywhere).
+2. **Release it from quarantine.** The app is not signed with an Apple developer certificate,
+   so macOS blocks downloaded copies ("Apple could not verify…"). Either run, in Terminal:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Bloodborne.app
+   ```
+
+   or open it once, then go to **System Settings → Privacy & Security** and click
+   **Open Anyway** next to the Bloodborne message.
+3. Open it. On first launch it asks for your game folder (the `CUSA03173` folder containing
+   `eboot.bin`) and checks it; if Rosetta 2 is missing it offers to install it.
+
+The app contains everything else (the game process, the native GPU process, the libraries and
+a small Python for the launch scripts). Saves and settings go to
+`~/Library/Application Support/Bloodborne`, the log to `~/Library/Logs/Bloodborne/game.log`.
+To choose a different game folder, delete `launch.conf` in the save folder.
+
+**The game files must be the original 1.09 executable.** A pre-patched `eboot.bin` (for
+example a 60 FPS patch made for jailbroken consoles) is rejected: this port applies its own
+60 FPS patches in memory at start, so use the unmodified `eboot.bin` from the 1.09 update.
+
+## Requirements (building from source)
 
 - A Mac with **Apple Silicon** running **macOS 15 or newer**
 - **Rosetta 2** (`softwareupdate --install-rosetta`)
@@ -245,6 +272,7 @@ launcher.
 | `patches/` | Community XML patches for Bloodborne 1.09 |
 | `Bloodborne.command` | Finder launcher (runs `run.sh` in Terminal) |
 | `scripts/macos/make_app.sh` | Builds `Bloodborne.app`, a launcher without a Terminal window (local, not committed) |
+| `scripts/macos/package_app.sh` | Builds the self-contained `dist/Bloodborne.app` and its zip for releases (CI: `.github/workflows/macos-release.yml`) |
 | `Saves` | Shortcut to the save folder (created on first launch, not committed) |
 | `launcher/` | GTK launcher from the Linux port (Linux reference path) |
 | `tools/` | Developer utilities, including `pkg_extract` (fpkg unpacker) |

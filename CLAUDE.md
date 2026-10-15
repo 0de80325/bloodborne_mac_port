@@ -128,6 +128,10 @@ the live path (the startup patch breaks geometry there). Check screenshots when 
   set in `bbgpu_init`) unless the upscaler at start is MetalFX: late game frames ~6x fewer.
 - **Retina** drawable (`BB_HIGH_DPI=0` for points). **Bloodborne.app** via
   `scripts/macos/make_app.sh` (local; `Bloodborne.command` for a Terminal launch).
+- **Release app** (2026-10-15): `scripts/macos/package_app.sh` → self-contained `dist/Bloodborne.app`
+  + zip (universal dylibs, bundled standalone Python, ad-hoc signed; users clear quarantine);
+  CI `.github/workflows/macos-release.yml` attaches it to `mac-v*` tag releases. run.sh now runs
+  `scripts/game_check.py` (rejects modified/pre-patched eboots; `BB_SKIP_GAME_CHECK=1`).
 - **Static recompilation** lives on branch `static-recompilation`
   (`docs/STATIC_RECOMPILATION_PLAN.md`): survey, test vectors, discovery, and a prototype where
   47k game functions lift to C and run natively on arm64, matching x86 bit for bit.

@@ -57,10 +57,24 @@ def explain(kind, title, version):
         'missing_update': f'{found} bbport needs the 1.09 update merged into the game folder: copy '
                           'everything from the dumped 1.09 update (e.g. CUSA03173-patch) into the '
                           'game folder, replacing files (eboot.bin and sce_sys too).',
-        'wrong_eboot': f'{found} param.sfo is from 1.09 but eboot.bin is not: copy eboot.bin from '
-                       'the dumped 1.09 update into the game folder, replacing the old one.',
+        'wrong_eboot': f'{found} param.sfo is from 1.09 but eboot.bin is not the original 1.09 '
+                       'executable. It may be modified: a pre-patched eboot.bin (60 FPS and similar '
+                       'patches for jailbroken consoles) does not work here; this port applies its '
+                       'own 60 FPS patches in memory. Copy the original eboot.bin from the dumped '
+                       '1.09 update into the game folder, replacing this one.',
         'other_title': f'{found} Only Bloodborne {SUPPORTED_TITLE} with update 1.09 is supported '
                        'for now; other editions and regions have a different executable.',
         'unreadable': f'{found} eboot.bin could not be read as a decrypted PS4 executable: dump '
                       'the game and the 1.09 update again.',
     }[kind]
+
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) != 2:
+        sys.exit('usage: game_check.py <game folder>')
+    found = problem(sys.argv[1])
+    if found:
+        print(explain(*found))
+        sys.exit(1)
+    print('OK: Bloodborne CUSA03173 with update 1.09')

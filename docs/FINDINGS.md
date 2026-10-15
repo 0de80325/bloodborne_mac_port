@@ -678,3 +678,14 @@ sample $(pgrep -x bb-probe) 10 1 -file profile.txt
 # GPU timeline while the game runs
 xcrun xctrace record --template "Metal System Trace" --attach $(pgrep -x bb-probe) --time-limit 3s --output gpu.trace
 ```
+
+## 2026-10-15: self-contained release app
+
+`scripts/macos/package_app.sh`: 126 MB app, 48 MB zip (libbbgpu 26 MB and libavcodec 27 MB
+universal; standalone Python 46 MB after trimming). Unzipped to a scratch folder: codesign
+verifies, no binary names the checkout, `DYLD_PRINT_LIBRARIES` shows every non-system library
+(MoltenVK included) loading from the bundle, and `open --env BB_DATA_DIR=<test data>` reached
+the title screen at 60 FPS. The bundled Python runs `game_check.py`; a one-byte change to
+eboot.bin is rejected as `wrong_eboot` with the pre-patched-executable explanation.
+Pre-existing, unrelated: `tests/test_run_settings.py` fails one case on master (third launch
+gets 640x360 instead of the live path at 1080p).

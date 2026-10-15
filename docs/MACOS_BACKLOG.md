@@ -351,5 +351,10 @@ Each item: what was done for now, what the refinement is, and where it lives.
 - **Launcher and `.app` bundle.** *Done 2026-10-14 night:* `scripts/macos/make_app.sh` builds a
   local `Bloodborne.app` (launcher for this checkout, game icon from `sce_sys/icon0.png`, log in
   `~/Library/Logs/Bloodborne`, error dialog; the window process runs as the bundle's executable
-  through a link so the Dock shows "Bloodborne"). *Remaining:* a self-contained, signed app
-  that carries the built binaries and does not need the repository or a Terminal build.
+  through a link so the Dock shows "Bloodborne"). *Done 2026-10-15:* a self-contained app for
+  downloads (`scripts/macos/package_app.sh`, built by `.github/workflows/macos-release.yml` on
+  `mac-v*` tags): universal libraries in Frameworks/, rpaths into the bundle, bundled standalone
+  Python, game check and Rosetta check with dialogs, ad-hoc signed. *Remaining:* Developer ID
+  signing and notarisation (needs a paid Apple developer account; the game process needs the
+  executable-memory entitlement under the hardened runtime); an app icon we may ship (the game's
+  own icon cannot be bundled).
