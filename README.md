@@ -152,6 +152,22 @@ a small Python for the launch scripts). Saves and settings go to
 `~/Library/Application Support/Bloodborne`, the log to `~/Library/Logs/Bloodborne/game.log`.
 To choose a different game folder, delete `launch.conf` in the save folder.
 
+**Preparing the game folder from PKG files.** The app needs an unpacked folder, not `.pkg`
+files. If you already play on shadPS4 you have one: use that folder, but first copy the
+contents of the update folder next to it (`CUSA03173-patch` or similar) into it, replacing
+files. To unpack decrypted (fake-signed) PKGs, download `pkg_extract-macOS.zip` from the same
+release, unzip it and, in Terminal from that folder:
+
+```sh
+xattr -d com.apple.quarantine pkg_extract
+./pkg_extract /path/to/base-game.pkg ~/Bloodborne        # creates ~/Bloodborne/CUSA03173
+./pkg_extract /path/to/update-1.09.pkg ~/Bloodborne-update
+ditto ~/Bloodborne-update/CUSA03173 ~/Bloodborne/CUSA03173   # merge the update over the game
+```
+
+Retail PKGs (from the PlayStation Store or a disc install) are encrypted with console keys and
+must be dumped on a jailbroken PS4 first; no Mac tool can unpack them.
+
 **The game files must be the original 1.09 executable.** A pre-patched `eboot.bin` (for
 example a 60 FPS patch made for jailbroken consoles) is rejected: this port applies its own
 60 FPS patches in memory at start, so use the unmodified `eboot.bin` from the 1.09 update.
