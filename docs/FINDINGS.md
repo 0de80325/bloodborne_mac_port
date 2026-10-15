@@ -551,6 +551,33 @@ in the menu keeps prefill until the next start.
 game frames per 5 s over 120 windows, GPU host memory flat at 2,570 MB for 8 minutes, no
 crash.
 
+### 1440p idle gaps, located (2026-10-15 night)
+
+Metal System Trace, 1440p native live, uncapped, Hunter's Dream walk spot (save at the wall),
+prefill on: 56.9 FPS, GPU busy 14.0 ms of a 17.6 ms frame, ~431 encoders per frame. Idle per
+frame by gap size: <5 µs 397 gaps / 0.17 ms, 5–20 µs 21 / 0.17 ms, 20–200 µs 5 / 0.35 ms,
+**0.2–1 ms 3.0 / 1.65 ms, >1 ms 1.0 / 1.24 ms**. So the idle time is a handful of long stalls
+at fixed places, not per-pass overhead.
+
+Where (every frame, same encoder positions in the ~450-encoder main command buffer):
+
+- **~1 ms between two tiny render passes inside the run of tessellated draws** (encoders
+  ~270→271: render 13 µs, then nothing for ~1 ms, then the next render pass). With
+  `BB_DROP_TESS=1` the >1 ms gaps fall from 1.0 to 0.2 per frame (1.24 → 0.29 ms) and FPS
+  56.9 → 61.5: **MoltenVK's tessellation emulation** (compute for the vertex/control stages,
+  then a render pass) stalls the GPU there. Not fresh memory: the trace's
+  `metal-resource-allocations` shows no buffer allocations during frames (only ~7 zero-byte
+  texture views per frame). `MVK_CONFIG_USE_MTLHEAP=1`: no change (3.3 ms of big gaps).
+- **~0.7 ms after a `vkCmdCopyImage` blit encoder** before the next render pass (encoder ~389).
+- **~0.6 ms at the end of the frame's command buffer**, before the presenter's first encoder
+  (`vkCmdClearColorImage` on the swapchain image).
+- **~0.75 ms between two compute encoders** around encoder ~84.
+
+Next: which MoltenVK barrier/fence or event sits at those positions (a MoltenVK debug build
+with encoder-boundary logging, or `MTL_DEBUG_LAYER` + `MTLCaptureManager` on one frame now that
+split mode avoids the old capture crash), and whether the tessellated draw's control stage
+waits for something the previous encoder only signals at its very end.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25

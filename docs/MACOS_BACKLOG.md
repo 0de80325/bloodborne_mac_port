@@ -320,6 +320,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   game's copy shader, not uploads, so zero-copy mostly saves CPU work (write faults, staging
   copies), not GPU time. It also needs EOP fences signalled at GPU completion (they are
   signalled at record time today), or the GPU reads buffers the game is already reusing.
+- **1440p idle stalls located (2026-10-15, FINDINGS "1440p idle gaps, located").** ~2.9 ms of
+  the ~3.6 ms idle per frame are four stalls at fixed encoder positions: ~1 ms inside the
+  tessellated-draw run (MoltenVK tessellation emulation; `BB_DROP_TESS=1` removes it, +4.6 FPS
+  at 1440p), ~0.7 ms after a `vkCmdCopyImage`, ~0.6 ms at the frame→presenter command-buffer
+  boundary, ~0.75 ms between two compute encoders. Not memory allocation, not heaps. *Next:*
+  find the MoltenVK barrier/fence at those positions; for tessellation, consider emulating it
+  ourselves (vertex-stage expansion in our shader recompiler) instead of MoltenVK's path.
 - **Versioned copy-shader table.** ~24 copies per frame rewrite one table between draws inside a
   pass, ending it. *Refinement:* give each draw group its own version of the table (copies built
   ahead of the submission) so the pass stays open; bound ~1 ms GPU at 1440p.
