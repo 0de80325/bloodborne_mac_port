@@ -345,6 +345,9 @@ Each item: what was done for now, what the refinement is, and where it lives.
   swallows ⌘, (its "Preferences…" item), wire that menu item to the overlay instead.
 - **Menu bugs on macOS.** "Subpixel jitter" ticks then unticks itself; upscaler/preset choices
   made in the menu were not what bbport.ini held afterwards (found upscaler=off, preset=0).
+  *2026-10-15:* settings were only written when the menu closed, so closing the game window (or
+  a crash) with the menu open lost them; they are now saved 0.3 s after the last change. Still to
+  check with the user (`BB_MENU_TRACE=1`): the jitter toggle flipping back.
 - **Launcher and `.app` bundle.** *Done 2026-10-14 night:* `scripts/macos/make_app.sh` builds a
   local `Bloodborne.app` (launcher for this checkout, game icon from `sce_sys/icon0.png`, log in
   `~/Library/Logs/Bloodborne`, error dialog; the window process runs as the bundle's executable

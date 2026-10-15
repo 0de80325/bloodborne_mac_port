@@ -88,7 +88,8 @@ bool IsMenuToggle(const SDL_KeyboardEvent& key) {
 #endif
     return false;
 }
-bool dirty = false; // settings changed while open: saved on close
+bool dirty = false; // settings changed: saved shortly after the last change, and on close
+std::chrono::steady_clock::time_point last_change{};
 float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
@@ -172,6 +173,7 @@ void Store(std::atomic<T>& target, T value, bool changed) {
     if (changed) {
         target = value;
         dirty = true;
+        last_change = std::chrono::steady_clock::now();
         widget_changed_this_frame = true;
     }
 }
@@ -1508,6 +1510,12 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     last_present = now;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
+    }
+    // Save 0.3 s after the last change (a slider drag writes once), not only when the menu
+    // closes: closing the window or a crash with the menu open used to lose the changes.
+    if (dirty && now - last_change > std::chrono::milliseconds(300)) {
+        dirty = false;
+        BbSettings::Save();
     }
     if (!Visible()) {
         return;
