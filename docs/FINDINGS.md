@@ -689,3 +689,14 @@ the title screen at 60 FPS. The bundled Python runs `game_check.py`; a one-byte 
 eboot.bin is rejected as `wrong_eboot` with the pre-patched-executable explanation.
 Pre-existing, unrelated: `tests/test_run_settings.py` fails one case on master (third launch
 gets 640x360 instead of the live path at 1080p).
+
+## 2026-10-15: "buffer.cpp:105" on Macs with less memory
+
+Reported from a player's Mac (and seen on the GitHub CI VM): the start stops at
+`Failed allocating buffer with error ErrorOutOfDeviceMemory` (buffer.cpp:105). The macOS buffer
+cache maps the guest GPU range as one 16 GiB Metal buffer, and one Metal buffer is limited to
+`maxBufferLength`, about 60% of the Mac's memory (28.1 GiB with 48 GB): Macs with less than about
+28 GB could not start. The game's GPU memory sits in the first few GiB: the city walk ran
+correctly with `BB_ARENA_GIB=4`. The arena now shrinks to the largest multiple of 4 GiB that fits
+(log line "GPU arena: N GiB"); `BB_MAX_BUFFER_GIB=9` (a 16 GB Mac) gave 8 GiB and a clean walk.
+Below 4 GiB (8 GB Macs) it stops with a message naming the limit.
