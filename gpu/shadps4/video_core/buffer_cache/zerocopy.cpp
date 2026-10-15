@@ -121,18 +121,11 @@ const Buffer* ZeroCopy::Import(BufferCache* owner, VAddr addr, u64 span, u64 phy
         return nullptr;
     }
     const vk::MemoryRequirements req = dev.getBufferMemoryRequirements(buf);
-    // The import only accepts host-visible types for this pointer; prefer a
-    // device-local one (unified memory: both, when offered).
-    u32 allowed = req.memoryTypeBits;
-    {
-        vk::MemoryHostPointerPropertiesEXT props;
-        if (dev.getMemoryHostPointerPropertiesEXT(
-                vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT,
-                reinterpret_cast<void*>(start), &props) == vk::Result::eSuccess &&
-            props.memoryTypeBits) {
-            allowed &= props.memoryTypeBits;
-        }
-    }
+    // MoltenVK's unified types are all host-visible; prefer device-local.
+    // (No vkGetMemoryHostPointerPropertiesEXT: the hpp dispatcher entry is
+    // null when the extension isn't enabled on the device. A wrong pick fails
+    // loudly at vkAllocateMemory and falls back to the arena path.)
+    const u32 allowed = req.memoryTypeBits;
     const vk::PhysicalDeviceMemoryProperties mem_props =
         instance.GetPhysicalDevice().getMemoryProperties();
     u32 type = UINT32_MAX;
