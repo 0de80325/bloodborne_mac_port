@@ -9,6 +9,16 @@ proper solution goes here under one of three categories, in priority order:
 
 Each item: what was done for now, what the refinement is, and where it lives.
 
+**Order agreed with the user (2026-10-15).** Performance first: stay ahead of the other Mac ports
+(bmy/bbport-mac reports 45–60 FPS at 1440p FSR on an M5 Max).
+1. Measure (CPU and Metal traces at 1440p and in a busy scene) to size the native Metal back end.
+2. Design the native Metal back end (plan doc, branch, switchable against MoltenVK).
+3. Build it in stages, the costliest path first, with MoltenVK kept as the fallback.
+4. Meanwhile: the M2 Max 2–3 FPS report (issue #2), an earlier shader compile start, a native
+   Mac launcher built for more than one game.
+5. Later: merge upstream bbport 0.5/0.6 (native game settings, online play, mouse look, aspect
+   ratios).
+
 ## 1. Stability
 
 - **PARKED (2026-10-13): the game window sometimes closes by itself in split mode** (grey screen,
@@ -256,6 +266,14 @@ Each item: what was done for now, what the refinement is, and where it lives.
 
 ## 2. Performance
 
+- **Native Metal back end (plan stage 3; user priority, 2026-10-15).** *Now:* the arm64 GPU host
+  renders through MoltenVK. *Refinement:* a Metal back end in the host behind the renderer
+  (pipelines, resource binding, render passes, textures, buffers, sync), keeping the shadPS4
+  front end and the shader recompiler (SPIR-V → MSL via SPIRV-Cross). Expected gains: the
+  recording thread's MoltenVK share (~43–47% measured single-process), merged render passes with
+  load/store actions we control, tessellation without MoltenVK's emulation stalls. Fragment
+  shading cost stays about the same. Gate: the step-1 measurements (FINDINGS).
+
 - **Resolution targets (user, 2026-10-13): locked 60 FPS; M4 Max 1440p native and 4K
   upscaled, base M5 1080p native, smaller Macs 1080p upscaled.** M4 Max today: 1080p native
   61–63, 4K Performance ~52, 1440p 49, 4K Quality 43 (FINDINGS). Two levers: (a) the draw
@@ -338,6 +356,10 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *Refinement:* clang `-fprofile-generate`/`-fprofile-use` with `.profdata`.
 
 ## 3. Mac GUI
+
+- **Native launcher app (user, 2026-10-15).** A SwiftUI launcher (game folder with the check,
+  settings, log, play/stop), designed so other games can be added later. bmy/bbport-mac has one
+  (`launcher-macos/`, GPL-2.0) for reference.
 
 - **Native Mac settings.** *Now:* the in-game ImGui overlay (`gpu/shim/bbport_overlay.cpp`), in
   English, opens with ⌘, or L3+R3 and shows FPS, render → output resolution and upscaler.

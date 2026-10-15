@@ -711,3 +711,35 @@ walked the city at 60 FPS (worst frames 18–44 ms vs 16.7 ms with `BB_GPU_PROCE
 tried 640x360 with FSR and 720p without, still slow, so it is not GPU resolution. The host now lists
 the regions in the way (address, size, VM tag, file) when the reservation fails. Waiting for a log
 with that and `BB_FRAME_STATS=1`.
+
+## 2026-10-15: sizing a native Metal back end (split mode, prefill on, M4 Max)
+
+Central Yharnam respawn spot after loading the test save, standing, uncapped
+(`BB_PRESENT_MODE=Immediate BB_FPS_LIMIT=0`), upscaler off; `sample` of `bbgpu-host` for 8 s
+and a 3 s Metal System Trace in the same run.
+
+| | 1440p native (live) | 1080p native |
+|---|---|---|
+| FPS uncapped | 55–58 | 71–77 |
+| GPU busy per frame | 14.6 ms (vertex 5.3, fragment 9.3, compute 1.7) | 10.8 ms (vertex 5.3, fragment 4.9, compute 1.7) |
+| GPU idle per frame | ~3.1 ms; 2.6 ms in ~4 stalls inside the prefilled command buffer | ~2.9 ms; 2.3 ms in ~3 stalls |
+| Metal encoders per frame | ~409 | ~409 |
+| `bb:VkRecorder` busy | 47% (MoltenVK 6.1, AGX driver 10.0, Metal/IOGPU/objc 5.7, malloc 3.0, memcpy etc. 6.3, ours 11.7) | 54% (MoltenVK 8.2, AGX 11.8, Metal/IOGPU/objc 7.8, malloc 4.0, memcpy etc. 8.2, ours 9.9) |
+| `bb:DrawRec` busy | 26% (ours 20) | 30% (ours 24) |
+| `GpuCommandProcessor` busy | 15% | 21% |
+
+Reading:
+- **On the M4 Max no CPU thread is saturated**: the GPU timeline sets the frame rate. The
+  recording thread is about half MoltenVK + Apple's driver; a Metal back end would roughly halve
+  its cost. That matters on slower CPUs (M1/M2, and the rival port, which is CPU-bound) more
+  than here.
+- **GPU idle (~3 ms/frame) is MoltenVK's**: the same stalls located on 2026-10-15 night
+  (tessellation emulation, after an image copy, command-buffer boundary, between compute
+  encoders). Our own encoding would avoid them.
+- **Vertex time is 5.3 ms at both resolutions**: geometry, binning and pass structure, not pixels.
+  ~409 encoders/frame (190 render passes at ~13–16 µs each, ~3 ms) plus re-binning per pass;
+  merging passes needs control over pass boundaries and load/store actions that Metal gives us
+  directly.
+- **Estimate**: removing the idle stalls and merging the needless passes (~1–2 ms) takes 1440p
+  from ~17.7 ms to ~13–14 ms per frame (~72–77 FPS uncapped; 60 locked with headroom), and
+  1080p from ~13.7 to ~10–11 ms. Fragment shading itself does not change.
