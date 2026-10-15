@@ -32,6 +32,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <libproc.h>
 
 void say(const char *format, ...) {
     char line[512];
@@ -315,6 +316,25 @@ static void find_vulkan_driver(void) {
     else say("no VK_DRIVER_FILES and no %s: Vulkan may find no driver", icd);
 }
 
+/* Names what already occupies the guest range (the reservation failed on an M2 Max, issue #2). */
+static void report_guest_range(void) {
+    mach_vm_address_t at = BBGPU_GUEST_MIN;
+    for (int n = 0; n < 16; ++n) {
+        mach_vm_size_t size = 0;
+        vm_region_extended_info_data_t info;
+        mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &at, &size, VM_REGION_EXTENDED_INFO, (vm_region_info_t)&info, &count,
+                           &object) != KERN_SUCCESS || at >= BBGPU_GUEST_MAX)
+            return;
+        char file[PATH_MAX] = "";
+        proc_regionfilename(getpid(), at, file, sizeof file);
+        say("  in the way: 0x%" PRIx64 "-0x%" PRIx64 " (%" PRIu64 " MiB) tag %u prot %d %s", (uint64_t)at,
+            (uint64_t)(at + size), (uint64_t)(size >> 20), info.user_tag, info.protection, file);
+        at += size;
+    }
+}
+
 int main(void) {
     find_vulkan_driver();
     /* A signal ends the host as a signal, not as SDL's polite quit event (exit status 0). */
@@ -324,10 +344,15 @@ int main(void) {
      * kernel hole below 0x7000000000 is the same in arm64 processes. */
     int status = 0;
     const uint64_t span = BBGPU_GUEST_MAX - BBGPU_GUEST_MIN;
+    /* BBGPU_TEST_BLOCK_RANGE=1 (testing) occupies the start of the range, as seen on an M2 Max. */
+    const char *block = getenv("BBGPU_TEST_BLOCK_RANGE");
+    if (block && !strcmp(block, "1"))
+        mmap((void *)BBGPU_GUEST_MIN, 1 << 20, PROT_READ, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
     void *reserved = mmap((void *)BBGPU_GUEST_MIN, span, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
     if (reserved != (void *)BBGPU_GUEST_MIN) {
         say("cannot reserve the guest range 0x%" PRIx64 "-0x%" PRIx64 " (got %p)", BBGPU_GUEST_MIN, BBGPU_GUEST_MAX, reserved);
         if (reserved != MAP_FAILED) munmap(reserved, span);
+        report_guest_range();
         status = ENOMEM;
     }
     mach_port_t parent = MACH_PORT_NULL;

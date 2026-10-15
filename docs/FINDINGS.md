@@ -700,3 +700,14 @@ cache maps the guest GPU range as one 16 GiB Metal buffer, and one Metal buffer 
 correctly with `BB_ARENA_GIB=4`. The arena now shrinks to the largest multiple of 4 GiB that fits
 (log line "GPU arena: N GiB"); `BB_MAX_BUFFER_GIB=9` (a 16 GB Mac) gave 8 GiB and a clean walk.
 Below 4 GiB (8 GB Macs) it stops with a message naming the limit.
+
+## 2026-10-15: M2 Max at 2–3 FPS (issue #2)
+
+The log shows `bbgpu-host: cannot reserve the guest range 0x7000000000-0xfc00000000 (got 0x7b8e400000)`
+on every launch: something already occupies the start of the guest range in the arm64 host on that
+Mac, so the game falls back to single-process mode. That fallback is not the slowdown by itself:
+recreating it here (`BBGPU_TEST_BLOCK_RANGE=1`, the host maps 1 MiB at 0x7000000000 first) still
+walked the city at 60 FPS (worst frames 18–44 ms vs 16.7 ms with `BB_GPU_PROCESS=0`). They also
+tried 640x360 with FSR and 720p without, still slow, so it is not GPU resolution. The host now lists
+the regions in the way (address, size, VM tag, file) when the reservation fails. Waiting for a log
+with that and `BB_FRAME_STATS=1`.
