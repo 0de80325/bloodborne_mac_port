@@ -116,6 +116,22 @@ Target (user): locked 60 FPS at the highest resolution (M4 Max: 1440p native, 4K
 M4 Max now: 1080p native ~62 uncapped, 1440p 49, 4K MetalFX Quality 43; scenes above 1080p use
 the live path (the startup patch breaks geometry there). Check screenshots when benchmarking.
 
+## State as of 2026-10-15 (mac-v0.3.0 + night session)
+
+- **Saves/settings** default to `~/Library/Application Support/Bloodborne` (run.sh; a `Saves`
+  link in the repo). The user's real save lives there: **never run tests against it**; test runs
+  use `BB_DATA_DIR=$PWD/out/macdata` (scratch scripts restore a snapshot there).
+- **Load race fixed** (`src/runtime_hooks.c`): eboot `0xebb960` (main thread's GPU setup) and
+  `0x2199af0` (GXRenderThread frame job) are hooked and run under one lock (`BB_CONTEXT_LOCK=0`
+  off). `BB_CALL_COUNTS=1` (branch only) counts libc setjmp/longjmp/throw.
+- **Judder:** MoltenVK prefilled command buffers (`MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS=2`,
+  set in `bbgpu_init`) unless the upscaler at start is MetalFX: late game frames ~6x fewer.
+- **Retina** drawable (`BB_HIGH_DPI=0` for points). **Bloodborne.app** via
+  `scripts/macos/make_app.sh` (local; `Bloodborne.command` for a Terminal launch).
+- **Static recompilation** lives on branch `static-recompilation`
+  (`docs/STATIC_RECOMPILATION_PLAN.md`): survey, test vectors, discovery, and a prototype where
+  47k game functions lift to C and run natively on arm64, matching x86 bit for bit.
+
 ## Next steps (in order)
 
 1. **Native arm64 GPU process** (docs/DESIGN_NATIVE_GPU_PROCESS.md): M0 spike passed (1.75× on
