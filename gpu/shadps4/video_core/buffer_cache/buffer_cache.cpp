@@ -353,6 +353,26 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     const u64 first_block = device_addr >> block_shift;
     const u64 last_block = (device_addr + size - 1) >> block_shift;
+#ifdef __APPLE__
+    // Zero-copy (zerocopy.cpp, BB_ZERO_COPY=1 in the native host): serve the bind
+    // straight from the pool pages. Texel buffers stay on the arena path.
+    if (!is_texel_buffer) {
+        if (auto imported = ObtainImported(device_addr, size); imported.first) {
+            if (stats) {
+                auto& region = Stats().regions[RegionKey(device_addr)];
+                ++region.arena_count;
+                region.arena_bytes += size;
+            }
+            if (is_written) {
+                gpu_modified_ranges.Add(device_addr, size);
+            }
+            if (note_use) {
+                runtime.NoteSubmissionUse(imported.first, imported.second, size);
+            }
+            return imported;
+        }
+    }
+#endif
     const auto* arena = GetArena(first_block, last_block);
     EnsureResident(arena, first_block, last_block);
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);

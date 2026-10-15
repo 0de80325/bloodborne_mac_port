@@ -18,6 +18,7 @@
 #include <mach/mach_vm.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
@@ -418,3 +419,13 @@ void gpu_process_start(void) {
     pthread_detach(thread);
 }
 #endif
+
+/* Zero-copy buffer import (gpu/.../buffer_cache/zerocopy.cpp) needs the pool
+ * offset of a mirrored range; only the native host tracks views. Single
+ * process (and bb-probe itself) has no view table: always miss, arena path. */
+bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out) {
+    (void)start;
+    (void)end;
+    (void)phys_out;
+    return false;
+}

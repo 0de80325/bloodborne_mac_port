@@ -6,6 +6,8 @@
 #include "bbport_copy.h"
 
 #include <deque>
+#include <memory>
+#include <utility>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -14,6 +16,9 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#ifdef __APPLE__
+#include "video_core/buffer_cache/zerocopy.h"
+#endif
 
 namespace AmdGpu {
 struct Liverpool;
@@ -134,6 +139,14 @@ private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
+#ifdef __APPLE__
+    /// Zero-copy import serving a bind straight from pool pages (zerocopy.cpp),
+    /// or {nullptr, 0} (arena fallback). Drops stale resident BDA coverage and
+    /// refills it from the import.
+    std::pair<const Buffer*, u64> ObtainImported(VAddr addr, u32 size);
+    /// Forgets resident BDA coverage of [addr, addr+size) (remap/evict).
+    void DropResident(VAddr addr, u64 size);
+#endif
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
@@ -174,6 +187,10 @@ private:
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
+#ifdef __APPLE__
+    /// Zero-copy pool imports (zerocopy.cpp, BB_ZERO_COPY=1); null until first use.
+    std::unique_ptr<ZeroCopy> zerocopy;
+#endif
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
 

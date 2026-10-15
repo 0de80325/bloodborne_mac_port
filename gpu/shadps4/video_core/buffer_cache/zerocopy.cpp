@@ -1,0 +1,288 @@
+// bbport: zero-copy buffer import (Apple only, BB_ZERO_COPY=1). See zerocopy.h.
+//
+// SPDX-License-Identifier: GPL-2.0-or-later
+#ifdef __APPLE__
+
+#include "video_core/buffer_cache/zerocopy.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+#include "bbport_split.h"
+#include "host/bbgpu_protocol.h"
+#include "video_core/buffer_cache/buffer.h"
+#include "video_core/buffer_cache/buffer_cache.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_runtime.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
+
+extern "C" bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out);
+
+namespace VideoCore {
+namespace {
+
+constexpr u64 kPage = BBGPU_GUEST_PAGE; // mirror views are page multiples
+constexpr u64 kMaxImport = 1ull << 30;  // larger ranges stay on the arena path
+constexpr size_t kMaxEntries = 256;
+constexpr u64 kMaxBytes = 2ull << 30; // evictions keep the newest; single imports
+                                     // are capped below so a fresh entry survives
+
+bool ZeroCopyWanted() {
+    static const int wanted = [] {
+        const char* env = std::getenv("BB_ZERO_COPY");
+        return env && env[0] == '1' ? 1 : 0;
+    }();
+    return wanted != 0;
+}
+
+void LogOnce(bool& done, const char* format, ...) {
+    if (done) {
+        return;
+    }
+    done = true;
+    char line[256];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof line, format, args);
+    va_end(args);
+    std::printf("ZeroCopy: %s\n", line);
+}
+
+} // namespace
+
+ZeroCopy::ZeroCopy(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_)
+    : instance{instance_}, scheduler{scheduler_} {}
+
+const Buffer* ZeroCopy::Obtain(BufferCache* owner, VAddr addr, u32 size, bool* fresh_out) {
+    (void)owner;
+    if (fresh_out) {
+        *fresh_out = false;
+    }
+    if (!ZeroCopyWanted() || !BbSplit::Host() || size == 0) {
+        return nullptr;
+    }
+    const u64 start = addr & ~(kPage - 1);
+    const u64 end = (u64(addr) + size + kPage - 1) & ~(kPage - 1);
+    if (end <= start || end - start > kMaxImport) {
+        return nullptr;
+    }
+    u64 phys = 0;
+    if (!host_view_phys(start, end, &phys)) {
+        ++fallbacks;
+        return nullptr;
+    }
+    std::scoped_lock lock{mutex};
+    SweepRetired();
+    const auto key = std::make_pair(start, end - start);
+    if (const auto it = index.find(key); it != index.end() && it->second->phys == phys) {
+        ++hits;
+        lru.splice(lru.begin(), lru, it->second);
+        return &it->second->buffer;
+    }
+    const Buffer* imported = Import(addr, size, phys);
+    if (!imported) {
+        ++fallbacks;
+    } else if (fresh_out) {
+        *fresh_out = true;
+    }
+    return imported;
+}
+
+const Buffer* ZeroCopy::Import(VAddr addr, u32 size, u64 phys) {
+    const u64 start = addr & ~(kPage - 1);
+    const u64 span = ((u64(addr) + size + kPage - 1) & ~(kPage - 1)) - start;
+    const vk::Device dev = instance.GetDevice();
+
+    vk::BufferCreateInfo bci;
+    bci.size = span;
+    bci.usage = AllFlags;
+    bci.sharingMode = vk::SharingMode::eExclusive;
+    vk::Buffer buf{};
+    if (dev.createBuffer(&bci, nullptr, &buf) != vk::Result::eSuccess || !buf) {
+        return nullptr;
+    }
+    const vk::MemoryRequirements req = dev.getBufferMemoryRequirements(buf);
+    // MoltenVK's unified types are all host-visible; the first set bit works
+    // (the spike verified bytes both directions on this machine).
+    u32 type = UINT32_MAX;
+    for (u32 i = 0; i < 32; ++i) {
+        if (req.memoryTypeBits & (1u << i)) {
+            type = i;
+            break;
+        }
+    }
+    if (type == UINT32_MAX) {
+        dev.destroyBuffer(buf, nullptr);
+        return nullptr;
+    }
+    vk::ImportMemoryHostPointerInfoEXT import;
+    import.handleType = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT;
+    import.pHostPointer = reinterpret_cast<void*>(start);
+    vk::MemoryAllocateInfo ai;
+    ai.pNext = &import;
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = type;
+    vk::DeviceMemory mem{};
+    if (dev.allocateMemory(&ai, nullptr, &mem) != vk::Result::eSuccess || !mem) {
+        dev.destroyBuffer(buf, nullptr);
+        return nullptr;
+    }
+    if (dev.bindBufferMemory(buf, mem, 0) != vk::Result::eSuccess) {
+        dev.freeMemory(mem, nullptr);
+        dev.destroyBuffer(buf, nullptr);
+        return nullptr;
+    }
+    vk::BufferDeviceAddressInfo bda_info;
+    bda_info.buffer = buf;
+    const vk::DeviceAddress bda = dev.getBufferAddress(&bda_info);
+    if (!bda) {
+        // Shaders address arena buffers by BDA; without one fall back.
+        dev.freeMemory(mem, nullptr);
+        dev.destroyBuffer(buf, nullptr);
+        return nullptr;
+    }
+
+    Entry entry;
+    entry.key = {start, span};
+    entry.addr = start;
+    entry.size = span;
+    entry.phys = phys;
+    entry.buffer.cpu_addr = start;
+    entry.buffer.size_bytes = static_cast<size_t>(span);
+    entry.buffer.mapped_data = std::span<u8>{reinterpret_cast<u8*>(start), static_cast<size_t>(span)};
+    entry.buffer.is_coherent = true;
+    entry.buffer.is_imported = true;
+    entry.buffer.mem_type = MemoryType::DeviceLocal;
+    entry.buffer.buffer.device = instance.GetDevice();
+    entry.buffer.buffer.allocator = VK_NULL_HANDLE;
+    entry.buffer.buffer.buffer = buf;
+    entry.buffer.buffer.bda_addr = bda;
+    entry.buffer.buffer.imported_memory = mem;
+
+    EvictOverlap(start, span);
+    lru.push_front(std::move(entry));
+    auto it = lru.begin();
+    index[{start, span}] = it;
+    bytes += span;
+    ++imports;
+    EnforceCaps();
+    static bool logged = false;
+    LogOnce(logged, "importing pool range 0x%llx+0x%llx (import #%llu)",
+            (unsigned long long)start, (unsigned long long)span,
+            (unsigned long long)imports.load());
+    return &it->buffer;
+}
+
+void ZeroCopy::EvictOverlap(VAddr addr, u64 size) {
+    const u64 end = addr + size;
+    for (auto it = index.begin(); it != index.end();) {
+        const u64 s = it->first.first, e = s + it->first.second;
+        if (s < end && addr < e) {
+            Retire(it->second);
+            it = index.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void ZeroCopy::Retire(std::list<Entry>::iterator it) {
+    bytes -= it->size;
+    ++evicts;
+    retired.push_back(Retired{it->buffer.buffer.buffer, it->buffer.buffer.imported_memory,
+                              scheduler.CurrentTick()});
+    // Prevent double-free: the list entry is gone; clear its handles first.
+    it->buffer.buffer.buffer = vk::Buffer{};
+    it->buffer.buffer.imported_memory = vk::DeviceMemory{};
+    lru.erase(it);
+}
+
+void ZeroCopy::SweepRetired() {
+    for (;;) {
+        bool waiting = false;
+        for (size_t i = 0; i < retired.size();) {
+            if (scheduler.IsFree(retired[i].tick)) {
+                const vk::Device dev = instance.GetDevice();
+                dev.destroyBuffer(retired[i].buffer, nullptr);
+                dev.freeMemory(retired[i].memory, nullptr);
+                retired[i] = retired.back();
+                retired.pop_back();
+            } else {
+                ++i;
+            }
+        }
+        if (retired.size() <= 512) {
+            return;
+        }
+        // Extreme pressure: wait for the oldest batch rather than leaking.
+        if (!waiting) {
+            scheduler.Wait(retired.front().tick);
+            waiting = true;
+        } else {
+            return; // still busy after a wait: leave the rest for next time
+        }
+    }
+}
+
+void ZeroCopy::EnforceCaps() {
+    while ((lru.size() > kMaxEntries || bytes > kMaxBytes) && !lru.empty()) {
+        auto it = std::prev(lru.end());
+        index.erase(it->key);
+        Retire(it);
+    }
+}
+
+} // namespace VideoCore
+
+// BufferCache integration (resident BDA coverage lives here).
+namespace VideoCore {
+
+void BufferCache::DropResident(VAddr addr, u64 size) {
+    if (!size) {
+        return;
+    }
+    const u64 first = addr >> block_shift;
+    const u64 last = (addr + size - 1) >> block_shift;
+    std::vector<Backing> kept;
+    for (const auto& backing : resident_ranges) {
+        const u64 s = backing.start, e = backing.end;
+        if (e <= first || s > last) {
+            kept.push_back(backing);
+            continue;
+        }
+        if (s < first) {
+            kept.push_back(backing.SubRange(s, first));
+        }
+        if (e > last + 1) {
+            kept.push_back(backing.SubRange(last + 1, e));
+        }
+    }
+    resident_ranges.Clear();
+    for (const auto& backing : kept) {
+        resident_ranges.Add(backing);
+    }
+}
+
+std::pair<const Buffer*, u64> BufferCache::ObtainImported(VAddr addr, u32 size) {
+    if (!zerocopy) {
+        zerocopy = std::make_unique<ZeroCopy>(instance, scheduler);
+    }
+    bool fresh = false;
+    const Buffer* imported = zerocopy->Obtain(this, addr, size, &fresh);
+    if (!imported) {
+        return {nullptr, 0};
+    }
+    if (fresh) {
+        // The import replaces any previous coverage (remap): refill BDA below.
+        DropResident(addr, size);
+        EnsureResident(imported, addr >> block_shift, (addr + size - 1) >> block_shift);
+        runtime.RegisterHoistTarget(imported, imported->size_bytes);
+    }
+    return {imported, imported->Offset(addr)};
+}
+
+} // namespace VideoCore
+
+#endif // __APPLE__

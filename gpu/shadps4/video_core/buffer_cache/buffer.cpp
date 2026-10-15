@@ -73,11 +73,17 @@ UniqueBuffer::~UniqueBuffer() {
 void UniqueBuffer::Destroy() {
     if (allocation) {
         vmaDestroyBuffer(allocator, buffer, allocation);
-    } else if (buffer) {
-        device.destroyBuffer(buffer);
+    } else {
+        if (buffer) {
+            device.destroyBuffer(buffer);
+        }
+        if (imported_memory) {
+            device.freeMemory(imported_memory);
+        }
     }
     buffer = VK_NULL_HANDLE;
     allocation = VK_NULL_HANDLE;
+    imported_memory = VK_NULL_HANDLE;
     bda_addr = 0;
 }
 

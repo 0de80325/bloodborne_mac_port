@@ -45,6 +45,7 @@ constexpr vk::BufferUsageFlags AllFlags =
 
 struct UniqueBuffer {
     explicit UniqueBuffer(vk::Device device, VmaAllocator allocator);
+    UniqueBuffer() = default;
     ~UniqueBuffer();
 
     UniqueBuffer(const UniqueBuffer&) = delete;
@@ -54,7 +55,8 @@ struct UniqueBuffer {
         : device{other.device}, buffer{std::exchange(other.buffer, VK_NULL_HANDLE)},
           bda_addr{std::exchange(other.bda_addr, 0)},
           allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
-          allocation{std::exchange(other.allocation, VK_NULL_HANDLE)} {}
+          allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
+          imported_memory{std::exchange(other.imported_memory, VK_NULL_HANDLE)} {}
 
     UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
         if (this != &other) {
@@ -64,6 +66,7 @@ struct UniqueBuffer {
             bda_addr = std::exchange(other.bda_addr, 0);
             allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
             allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
+            imported_memory = std::exchange(other.imported_memory, VK_NULL_HANDLE);
         }
         return *this;
     }
@@ -73,16 +76,20 @@ struct UniqueBuffer {
 
     void Destroy();
 
-    vk::Device device;
+    vk::Device device{};
     vk::Buffer buffer{};
     vk::DeviceAddress bda_addr{};
-    VmaAllocator allocator;
+    VmaAllocator allocator{};
     VmaAllocation allocation{};
+    /// Zero-copy import (buffer_cache/zerocopy.cpp, Apple only): raw device memory
+    /// imported from a host pointer, freed directly (no VMA involvement).
+    vk::DeviceMemory imported_memory{};
 };
 
 struct Buffer {
     explicit Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
                     MemoryType mem_type, std::string_view debug_name = "");
+    Buffer() = default;
 
     Buffer& operator=(const Buffer&) = delete;
     Buffer(const Buffer&) = delete;
@@ -125,6 +132,9 @@ struct Buffer {
     size_t size_bytes = 0;
     std::span<u8> mapped_data{};
     bool is_coherent{};
+    /// Zero-copy import of pool pages (buffer_cache/zerocopy.cpp, Apple only):
+    /// uploads are skipped (bytes are shared), BDA/table handling as usual.
+    bool is_imported = false;
     MemoryType mem_type{MemoryType::DeviceLocal};
     UniqueBuffer buffer;
 };

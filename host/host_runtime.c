@@ -9,6 +9,7 @@
 #include "gpu/bbgpu.h"
 #include <errno.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <mach/mach_vm.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -84,6 +85,18 @@ int host_view_covered(uint64_t start, uint64_t end) {
     pthread_rwlock_unlock(&table_lock);
     return result;
 }
+
+bool host_view_phys(uint64_t start, uint64_t end, uint64_t* phys_out) {
+    if (!end || end < start) return false;
+    pthread_rwlock_rdlock(&table_lock);
+    const size_t i = view_index(start);
+    const bool ok = i < view_count && views[i].start <= start && views[i].end >= end;
+    const uint64_t phys = ok ? views[i].phys + (start - views[i].start) : 0;
+    pthread_rwlock_unlock(&table_lock);
+    if (ok) *phys_out = phys;
+    return ok;
+} 
+
 void host_view_stats(uint64_t *count, uint64_t *bytes, uint64_t *applied, uint64_t *failed) {
     pthread_rwlock_rdlock(&table_lock);
     *count = view_count;
