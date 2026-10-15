@@ -334,8 +334,10 @@ static uint64_t first_occupied(uint64_t from) {
     return addr >= BBGPU_GUEST_MAX ? BBGPU_GUEST_MAX : (uint64_t)addr;
 }
 
-/* Slack above the pool entry for the flat image and other low guest mappings. */
-#define HOST_IMAGE_SLACK UINT64_C(0x40000000)
+/* Slack above the pool entry for the flat image and other low guest mappings
+ * (measured ~200 MiB: 97 MiB image, 64 MiB main-thread stack, misc). Kept small:
+ * every extra byte is odds against ASLR-placed system mappings in the range. */
+#define HOST_IMAGE_SLACK UINT64_C(0x20000000)
 
 static int reserve_prefix(uint64_t pool_span) {
     const uint64_t need =
