@@ -592,6 +592,11 @@ in High Power mode throughout; the power log shows the display going to sleep ar
 Cause not found (display asleep, background work earlier such as indexing, CPU scheduling).
 So compare variants only back to back in one session, as the A/B runs above did.
 
+Prefill A/B repeated in this faster state (02:35–02:47, alternating, 2 runs each): late game
+frames per 5 s **3.0 and 5.2 without prefill, 0.5 and 0.5 with it**; frames late on the display
+per run **80 and 157 without, 5 and 7 with**; GPU command thread 15–17 vs 7 µs per draw (the
+encoding no longer competes with it). The judder fix holds in both machine states.
+
 ### Frame spike log: where judder comes from (2026-10-14, on mains)
 
 `BB_FRAME_STATS=1` now prints a "Spike #N" line for every frame that arrives more than 1.25
