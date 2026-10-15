@@ -173,10 +173,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   *Refinement:* emit bounds checks in the SPIR-V backend (`shader_recompiler/backend/spirv`) for
   buffer loads/stores/atomics on macOS — targeted first (vertex fetch, storage buffers) where
   glitches trace back to OOB reads, everywhere if a native Metal backend is built.
-- **Buffer-cache arena window.** *Now:* one fully backed 16 GiB arena at 0x7000000000
-  (`BufferCache::MacArenaBase/MacArenaPages`); a GPU buffer outside it stops with "outside the
-  macOS guest arena". *Refinement:* per-page arenas with copy-based migration (rewriting the
-  BDA page table), or zero-copy import (Performance) which removes arenas altogether.
+- **Buffer-cache arena window.** *Now:* one 4 GiB arena per covered page at 0x7000000000
+  (`BufferCache::MacArenaBase`, `BB_ARENA_GIB` pages; a single multi-GiB device allocation
+  exhausts small Apple GPUs — 16 GiB fails at creation, 8 GiB thrashes a 12 GiB heap —
+  while 4 GiB allocations fit, so pages are separate arenas); a GPU buffer outside all
+  arenas stops with "outside the macOS guest arena". *Refinement:* on-demand page arenas
+  with copy-based migration (rewriting the BDA page table), or zero-copy import
+  (Performance) which removes arenas altogether.
 - **Host pointers above 1 TiB reach the guest.** `__error` returns the host thread's errno
   address (0x7fc6…), above the game's 40-bit pointer range. Harmless if used immediately; if
   the game ever stores it packed, route errno through a per-thread low (<1 TiB) slot.

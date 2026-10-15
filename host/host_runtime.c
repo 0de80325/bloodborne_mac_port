@@ -117,6 +117,13 @@ void host_view_apply(uint32_t op, uint32_t prot, uint64_t address, uint64_t size
             fail_view(op, address, size, phys, "entry range check", EINVAL);
             break;
         }
+        /* Above the host's reservation live host mappings (or nothing reserved): replacing
+         * them would corrupt this process, so fail loudly instead (the game continues
+         * single-process when the reservation never covered them). */
+        if (end > host_reservation_end()) {
+            fail_view(op, address, size, phys, "outside host reservation", ENOMEM);
+            break;
+        }
         mach_vm_address_t at = start;
         kern_return_t kr = mach_vm_map(mach_task_self(), &at, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, entry, phys,
                                        FALSE, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE);
@@ -127,7 +134,12 @@ void host_view_apply(uint32_t op, uint32_t prot, uint64_t address, uint64_t size
         break;
     }
     case BBGPU_EV_UNMAP:
-        /* back to the reservation, as the runtime does */
+        /* back to the reservation, as the runtime does (gated like MAP: restoring PROT_NONE
+         * over a host mapping would corrupt this process just as surely). */
+        if (end > host_reservation_end()) {
+            fail_view(op, address, size, phys, "outside host reservation", ENOMEM);
+            break;
+        }
         if (mmap((void *)start, size, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0) == MAP_FAILED) {
             fail_view(op, address, size, phys, "mmap(PROT_NONE)", errno);
             break;

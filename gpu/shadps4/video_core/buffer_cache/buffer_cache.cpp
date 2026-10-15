@@ -93,10 +93,14 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
 #ifdef __APPLE__
-    // bbport: MoltenVK has no sparse binding. One ordinary arena covers the start of the guest
+    // bbport: MoltenVK has no sparse binding. Ordinary arenas cover the start of the guest
     // GPU range instead (runtime_memory.c places guest memory from USER_MIN = 0x7000000000 on
     // macOS); Metal commits its memory as it is touched, so the unused part costs nothing.
-    // Requests outside it stop in GetArena (docs/MACOS_BACKLOG.md: per-page arenas).
+    // One arena per 4 GiB page (not one for the whole span): a single multi-GiB device
+    // allocation exhausts the budget of small Apple GPUs (12 GiB heap: 16 GiB fails at
+    // creation, 8 GiB leaves the heap so full that every frame thrashes), while 4 GiB
+    // allocations fit. Requests outside all arenas stop in GetArena
+    // (docs/MACOS_BACKLOG.md: per-page arenas).
     const u64 first_page = MacArenaBase >> ARENA_PAGE_BITS;
     // BB_ARENA_GIB (multiple of 4): smaller arenas for tools that snapshot every buffer (Metal
     // frame capture fails on the full size).
@@ -105,12 +109,17 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         const u64 gib = env ? std::strtoull(env, nullptr, 10) : 0;
         return gib >= 4 ? std::min<u64>(gib / 4, 6) : MacArenaPages;
     }();
-    const auto* arena = &arenas.emplace_back(instance, MacArenaBase, arena_pages << ARENA_PAGE_BITS,
-                                             MemoryType::DeviceLocal, "Guest Arena");
-    for (u64 page = 0; page < arena_pages; ++page) {
+    const auto* first_arena = &arenas.emplace_back(instance, MacArenaBase, ARENA_PAGE_SIZE,
+                                                       MemoryType::DeviceLocal, "Guest Arena");
+    address_space[first_page] = first_arena;
+    runtime.RegisterHoistTarget(first_arena, ARENA_PAGE_SIZE);
+    for (u64 page = 1; page < arena_pages; ++page) {
+        const u64 base = MacArenaBase + (page << ARENA_PAGE_BITS);
+        const auto* arena = &arenas.emplace_back(instance, base, ARENA_PAGE_SIZE,
+                                                 MemoryType::DeviceLocal, "Guest Arena");
         address_space[first_page + page] = arena;
+        runtime.RegisterHoistTarget(arena, ARENA_PAGE_SIZE);
     }
-    runtime.RegisterHoistTarget(arena, arena_pages << ARENA_PAGE_BITS);
 #endif
 }
 

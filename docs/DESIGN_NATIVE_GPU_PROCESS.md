@@ -62,9 +62,13 @@ The interface is already narrow (measured from the code):
 - Today the guest pool is one anonymous region; guest views are `mach_vm_remap` aliases
   (`src/runtime_memory.c`). It becomes a **Mach named memory entry**
   (`mach_make_memory_entry_64`), whose send right is passed to the host at launch.
-- The host reserves the same guest range (`[0x7000000000, 0xfc00000000)`; the 63–448 GiB
+- The host reserves the used prefix of the guest range (`[0x7000000000, ...)`; the 63–448 GiB
   kernel hole is the same in arm64 processes) and maps views at identical addresses with
-  `mach_vm_map` of the memory entry. Every guest map/unmap/protect in the runtime is mirrored to
+  `mach_vm_map` of the memory entry. The prefix covers the pool entry plus slack for the flat
+  image and other low mappings (the game packs mappings low, first-fit from the base): a single
+  reservation of the whole range is impossible where the system has already placed mappings
+  (malloc zones) inside it, and `MAP_FIXED` would silently replace those, so the prefix is
+  walked first and views above it fail loudly instead of corrupting the host. Every guest map/unmap/protect in the runtime is mirrored to
   the host through the existing GPU hooks (`runtime_memory_set_gpu_hooks`), now as messages.
 - The guest image and stacks are not GPU-visible and stay private to `bb-probe`.
 - This also realises the **zero-copy** backlog item: the host can import guest pages straight

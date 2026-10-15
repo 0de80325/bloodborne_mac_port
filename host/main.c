@@ -18,6 +18,7 @@
 #include <inttypes.h>
 #include <mach/mach_vm.h>
 #include <mach/notify.h>
+#include <mach/vm_region.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -315,26 +316,70 @@ static void find_vulkan_driver(void) {
     else say("no VK_DRIVER_FILES and no %s: Vulkan may find no driver", icd);
 }
 
+static uint64_t reservation_end; /* end (exclusive) of the guest prefix reservation */
+uint64_t host_reservation_end(void) { return reservation_end; }
+
+/* First mapped address at or above `from` (clamped to BBGPU_GUEST_MAX): anything
+ * below it is free for the prefix reservation. */
+static uint64_t first_occupied(uint64_t from) {
+    mach_vm_address_t addr = from;
+    mach_vm_size_t size = 0;
+    struct vm_region_basic_info_64 info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t obj = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO,
+                       (vm_region_info_t)&info, &count, &obj) != KERN_SUCCESS)
+        return BBGPU_GUEST_MAX;
+    if (addr <= from && from < addr + size) return from; /* occupied exactly at `from` */
+    return addr >= BBGPU_GUEST_MAX ? BBGPU_GUEST_MAX : (uint64_t)addr;
+}
+
+/* Slack above the pool entry for the flat image and other low guest mappings. */
+#define HOST_IMAGE_SLACK UINT64_C(0x40000000)
+
+static int reserve_prefix(uint64_t pool_span) {
+    const uint64_t need =
+        (pool_span + HOST_IMAGE_SLACK + BBGPU_GUEST_PAGE - 1) & ~(BBGPU_GUEST_PAGE - 1);
+    const uint64_t first = first_occupied(BBGPU_GUEST_MIN);
+    if (first - BBGPU_GUEST_MIN < need) {
+        say("guest range blocked at 0x%" PRIx64 " (need 0x%" PRIx64 " for the 0x%" PRIx64
+            "-byte pool): single-process",
+            first, need, pool_span);
+        return ENOMEM;
+    }
+    void *at = mmap((void *)BBGPU_GUEST_MIN, (size_t)need, PROT_NONE,
+                    MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED, -1, 0);
+    if (at != (void *)BBGPU_GUEST_MIN) {
+        say("cannot reserve the guest prefix 0x%" PRIx64 "-0x%" PRIx64 ": %s", BBGPU_GUEST_MIN,
+            BBGPU_GUEST_MIN + need, at == MAP_FAILED ? strerror(errno) : "misplaced");
+        return ENOMEM;
+    }
+    reservation_end = BBGPU_GUEST_MIN + need;
+    say("reserved guest prefix 0x%" PRIx64 "-0x%" PRIx64 " (pool 0x%" PRIx64 " bytes)",
+        BBGPU_GUEST_MIN, reservation_end, pool_span);
+    return 0;
+}
+
 int main(void) {
     find_vulkan_driver();
     /* A signal ends the host as a signal, not as SDL's polite quit event (exit status 0). */
     setenv("SDL_NO_SIGNAL_HANDLERS", "1", 1);
     say("pid %d, %s, page %d bytes", (int)getpid(), translated() ? "TRANSLATED (Rosetta)" : "native arm64", getpagesize());
-    /* The guest range first, before anything (Metal, the window server) maps memory there. The
-     * kernel hole below 0x7000000000 is the same in arm64 processes. */
-    int status = 0;
-    const uint64_t span = BBGPU_GUEST_MAX - BBGPU_GUEST_MIN;
-    void *reserved = mmap((void *)BBGPU_GUEST_MIN, span, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-    if (reserved != (void *)BBGPU_GUEST_MIN) {
-        say("cannot reserve the guest range 0x%" PRIx64 "-0x%" PRIx64 " (got %p)", BBGPU_GUEST_MIN, BBGPU_GUEST_MAX, reserved);
-        if (reserved != MAP_FAILED) munmap(reserved, span);
-        status = ENOMEM;
-    }
+    /* The handshake first: it announces the pool size the reservation must cover. Its own
+     * allocations are small and short-lived (the inherited ports array is freed at once). */
     mach_port_t parent = MACH_PORT_NULL;
     if (handshake(&parent)) return 1;
     mach_port_deallocate(mach_task_self(), parent); /* the handshake port; control goes through ctl_port */
-    say("handshake done: parent pid %d, guest entry 0x%" PRIx64 " bytes, guest range 0x%" PRIx64 "-0x%" PRIx64 " reserved",
-        (int)parent_pid, entry_size, BBGPU_GUEST_MIN, BBGPU_GUEST_MAX);
+    say("handshake done: parent pid %d, guest entry 0x%" PRIx64 " bytes",
+        (int)parent_pid, entry_size);
+    /* The guest range next, before Metal and the window server map more of it. The kernel
+     * hole below 0x7000000000 is the same in arm64 processes, but above it the system may
+     * already have placed mappings (malloc zones) inside the range: reserve the used prefix
+     * (the pool entry plus the flat image and other low mappings; the game packs mappings
+     * low, first-fit from the base) instead of demanding the whole range. MAP_FIXED would
+     * silently replace those mappings, so the prefix is walked first and views above it
+     * fail gracefully (host_runtime.c) rather than clobber host memory. */
+    int status = reserve_prefix(entry_size);
     if (!status) status = map_shared();
     /* The entry must be mappable here (send right valid, size as announced). */
     if (!status) {
