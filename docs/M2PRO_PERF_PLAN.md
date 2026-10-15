@@ -1,0 +1,369 @@
+# M2 Pro Performance Plan — Memory first, then GPU
+
+Status: **draft plan** (2026-10-15). Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2`.
+Machine: Apple M2 Pro, 16 GB RAM (12 GiB GPU heap), macOS 27.0.1.
+Current state: ~1–3 FPS (median frame 550–990 ms, worst 1.3–4.8 s) with the launch recipe below.
+Goal: **playable framerates on this machine** — intermediate target ≥ 30 FPS in menus,
+≥ 24 FPS in the Hunter's Dream and ≥ 20 FPS in Central Yharnam at 720p-class render
+(FSR3 → 1080p output); final target whatever this GPU's ceiling turns out to be.
+
+The plan is ordered so that **cheap configuration experiments come first** (no rebuilds),
+instrumentation and code changes only where a measurement says they're needed.
+
+---
+
+## 0. TL;DR of the diagnosis (why we think 3 FPS is not "M2 Pro too weak")
+
+Evidence from this machine's logs (`/tmp/bb-zc6.log`, `/tmp/bb-zc7.log`, `/tmp/bb-cap.log`):
+
+| Observation | Value | Meaning |
+|---|---|---|
+| Menu scenes at **14–160 draws** | 550–2400 ms/frame, 0.4–1.9 FPS | A 14-draw menu is trivial GPU work; half-second frames cannot be shading cost. |
+| `GPU thread … us/draw` (CPU time per draw on the recording thread) | **3,100–44,000 µs** | Healthy is tens of µs. 2–3 orders of magnitude slow. |
+| `Frame timeline: command thread waiting for recording` | 1,474–2,336 ms/frame | The GPU command thread is starved: it waits over a second for recorded work. |
+| `flip submit -> GPU done` | 1,149–1,500 ms | Even the GPU's own execution of one submitted frame takes > 1 s. |
+| `presented->display` | 1,179–2,588 ms | The display link path is equally stalled. |
+| `Texture cache: memory pressure, 10421 of 9699 MiB (critical 10669)` | recurring | Total Vulkan device usage sits **between** the pressure (9,699 = 80% of budget) and critical (10,669 = 88%) marks of a ≈ 12,124 MiB budget (the 12 GiB GPU heap). **0 images evicted.** |
+| Same code on M4 Max | 60 FPS | The renderer itself is fine; this machine's memory system is the difference. |
+
+**Hypothesis (falsifiable):** the machine is overcommitted — guest pool ≈ 5.4 GiB
+(5056 MiB + 448 MiB flexible) + Vulkan device usage ≈ 10.4 GiB + macOS/apps ≈ everything
+else on a 16 GiB machine — so the GPU heap sits at its ceiling and the OS swaps/compresses,
+which turns every driver-level operation into a multi-millisecond stall. The GPU is starved,
+not weak (consistent with the user's observation that the GPU looks unused).
+
+**Falsification test:** reduce the footprint (below) and re-measure. If menu FPS jumps to
+≥ 30 with no long stalls, the hypothesis holds and we tune the GPU. If menu FPS stays ≤ 5,
+the hypothesis is wrong and Phase D (profiling) takes over.
+
+### Realistic ceiling for this hardware
+M2 Pro GPU ≈ ⅓ of an M4 Max. A sane port should do ~20–25 FPS at 1080p native, more at
+720p→FSR3, and menus near the frame cap. 60 FPS at native 1080p is not a target on this box.
+
+---
+
+## 1. Ground rules (read first)
+
+1. **One variable per run.** Never change two knobs between two measured runs.
+2. **Reboot before the baseline** (clear swap/compressor state). Between later runs, quit
+   all big apps; check `sysctl vm.swapusage` shows `used` near 0.
+3. **Warm cache:** the first run after a change may build pipeline caches; measure the second.
+4. **Same play script every run** so numbers compare:
+   1. Boot to the title menu, idle 30 s (record menu FPS).
+   2. Continue → Hunter's Dream lamp; walk a fixed loop for 60 s.
+   3. (If reachable) Central Yharnam plaza, 60 s.
+   4. Quit cleanly.
+5. **Capture everything**: log via `tee`, memory samples via the script in Phase A.
+6. A run ending in `Device lost` or `outside the macOS guest arena` is **invalid** — record
+   it as a failure of that configuration, restore the previous knob, move on.
+7. Record every run in the results table (§ 4). No numbers in the table → the run didn't happen.
+
+---
+
+## 2. Knobs and where they live (cheat sheet)
+
+| Knob | Default | What it does | Where |
+|---|---|---|---|
+| `BB_ARENA_GIB` | 16 (4 × 4 GiB pages) | Size of the fallback device-local arenas; any multiple of 4, capped at 24. Current runs use **8** (2 pages). | `gpu/.../buffer_cache/buffer_cache.cpp:107-111`, `buffer_cache.h:52` |
+| `BB_ZERO_COPY` | off | Serves buffer binds by importing pool pages (`VK_EXT_external_memory_host`) instead of copying into an arena. Import caps: 256 entries / 2 GiB / single import ≤ 1 GiB. | `gpu/.../buffer_cache/zerocopy.cpp:28-40` |
+| `BB_DMEM_MB` | 5056 | Guest direct memory ("pool"). Range 5056–16384. `run.sh` exports **9152** for the patch path unless overridden. | `src/runtime_memory.c:25-35`, `run.sh:130` |
+| `BB_LIVE_RES=1` | (ini: 0) | Live path: guest renders 1080p, host scales at runtime. Leave unset (=ini 0) → patch path: whole frame renders at preset size (1280x720 at preset 1) and the upscaler fills 1080p. | `run.sh:96-132`, `scripts/patches.py:136-157` |
+| `BB_GC_BUDGET_MB` | 0 (driver budget) | Forces the texture cache's GC budget. Marks: trigger 70%, pressure 80%, critical 88% of it. | `gpu/.../texture_cache/texture_cache.cpp:1017-1042` |
+| `BB_GC_IDLE_SECONDS` | 20 | Age before an image below the pressure mark is evictable (idle eviction). | `texture_cache.cpp:1062-1065` |
+| `BB_GC_TRIGGER/PRESSURE/CRITICAL` | 70/80/88 | Percentages of the budget for the three marks. | `texture_cache.cpp:1027-1038` |
+| `BB_HIGH_DPI=0` | (macOS default 1) | Window/swapchain at 1x pixels instead of the display's 2x. | host |
+| `BB_SHADER_COMPILE=skip` | balanced | Skip draws while background compiles run (no mid-frame compile stalls). | `bbport_settings.cpp` |
+| `BB_FRAME_STATS=1` | off | Per-frame stall lines + 5 s summaries in the log. | `bbport_toggles.h:105-135` |
+| `BB_DROP_TESS=1` | off | Diagnostic: drops tessellated draws (visual cost). | FINDINGS 2026-10-15 |
+| `iogpu.wired_limit_mb` | 0 (auto ≈ 75% ≈ 12 GiB) | macOS GPU wired-memory cap. Experiment E7 only. | `sysctl` |
+
+Current `bbport.ini`: `upscaler=fsr3`, `preset=1`, `output_res=1920x1080`,
+`live_resolution=0`, `shader_compile=skip`.
+
+---
+
+## 3. The plan
+
+### Phase A — Harness, baseline, and the one instrumentation we need
+
+#### A.1 Create the memory sampler (5 min, no rebuild)
+Goal: one line every 5 s in a TSV so every run has memory data next to it.
+
+- A.1.1. Create `tools/m2perf/sample_mem.sh`:
+  ```sh
+  #!/usr/bin/env bash
+  # Logs memory state every 5 s while the game runs. Usage: sample_mem.sh OUT.tsv
+  out=${1:?usage: sample_mem.sh OUT.tsv}
+  printf 'time\tswap_used_MB\twired_MB\tcompressor_MB\tbb_probe_MB\tbbgpu_host_MB\n' > "$out"
+  while :; do
+      swap=$(sysctl -n vm.swapusage | awk '{gsub(/M/,"",$6); print $6}')
+      read -r wired comp < <(vm_stat | awk '
+          /Pages wired down/            {gsub(/\./,"",$4); w=$4}
+          /Pages occupied by compressor/{gsub(/\./,"",$5); c=$5}
+          END {print w, c}')
+      # pages are 16 KiB on this machine → /64 = MiB
+      wired=$((wired / 64)); comp=$((comp / 64))
+      rss() { ps -axo rss=,comm= | awk -v p="$1" '$0 ~ p && !/awk/ {s+=$1} END {printf "%d", s/1024}'; }
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%T)" "$swap" "$wired" "$comp" "$(rss bb-probe)" "$(rss bbgpu-host)" >> "$out"
+      sleep 5
+  done
+  ```
+- A.1.2. `chmod +x tools/m2perf/sample_mem.sh`.
+- A.1.3. Sanity-check it standalone for 10 s, then Ctrl-C.
+
+#### A.2 Instrument the device-memory composition (30–60 min, rebuild)
+Goal: know **what** the ~10.4 GiB of device usage is (textures vs. arenas vs. imports).
+Needed before Phase B's GC experiment can be interpreted, and certainly before Phase D.
+This is additive (a print), so it cannot change behavior beyond log volume.
+
+- A.2.1. Expose the counters.
+  - In `gpu/shadps4/video_core/buffer_cache/zerocopy.h` add public getters returning
+    `bytes, hits, imports, fallbacks, evicts` (snapshots of the atomics).
+- A.2.2. Add a periodic line. The texture cache already prints every ~5 s under
+  `BB_FRAME_STATS` (`texture_cache.cpp` ~line 1161). Extend that block to also print:
+  ```
+  Mem[vk]: usage <X> MiB of budget <Y> (trigger <T>); zerocopy bytes <B> hits <H>
+           imports <I> fallbacks <F> evicts <E>; images used <N>
+  ```
+  using `instance.GetDeviceMemoryUsage()`, `instance.GetDeviceMemoryBudgetNow()`,
+  the new getters, and the texture cache's `total_used_memory`.
+- A.2.3. Rebuild the arm64 GPU library (split mode loads this one):
+  `bash scripts/macos/build_gpu_arm64.sh`
+  (fall back to `BB_LTO=OFF bash scripts/macos/build_gpu_arm64.sh` if the link is slow/broken).
+- A.2.4. Quick smoke test: run once, confirm the new line appears, quit.
+
+#### A.3 Baseline run (30 min incl. reboot)
+- A.3.1. Quit everything, **reboot**, wait 2 min for the system to settle.
+- A.3.2. From the repo root:
+  ```sh
+  BB_GAME_DIR=/Users/onur/Bloodborne/CUSA03173 \
+  BB_GPU_PROCESS=1 BB_ARENA_GIB=8 BB_HIGH_DPI=0 BB_FRAME_STATS=1 \
+  BB_SHADER_COMPILE=skip BB_UPSCALER=fsr3 BB_UPSCALE_PRESET=1 \
+  BB_ZERO_COPY=1 BB_LIVE_RES=1 bash run.sh 2>&1 | tee /tmp/bb-plan-base.log
+  ```
+  In a second terminal start the sampler:
+  `bash tools/m2perf/sample_mem.sh /tmp/bb-plan-base-mem.tsv`
+- A.3.3. Follow the § 1.4 play script; quit the game; Ctrl-C the sampler.
+- A.3.4. Extract the numbers and fill the results table (§ 4, row "baseline"):
+  ```sh
+  grep -E "Frame stats:|Frame pacing:|Texture cache:|Stall:|Mem\[vk\]:|ZeroCopy:" /tmp/bb-plan-base.log | tail -60
+  grep -cE "outside the macOS guest arena|Device lost" /tmp/bb-plan-base.log
+  # Memory samples peak:
+  sort -t$'\t' -k3 -nr /tmp/bb-plan-base-mem.tsv | head -3
+  ```
+- A.3.5. **Gate A:** if the baseline does **not** reproduce ~1–2 FPS, stop and re-run; the
+  machine state matters (other apps, previous swap). If it reproduces, continue.
+
+### Phase B — Footprint experiments (no code, one variable at a time)
+
+Each experiment: repeat the § A.3.2–A.3.4 procedure with `tee /tmp/bb-plan-E<n>.log` and
+its own TSV, one change from the previous best config (start from the baseline, adopt a
+change only when the run improves).
+
+#### B.1 E1 — Halve the fallback arena: `BB_ARENA_GIB=4`
+- B.1.1. Rationale: the 2 × 4 GiB arenas are the biggest **non-evictable** device
+  allocation we control. With zero-copy serving pool-backed buffers, page 0's 4 GiB may be
+  enough coverage.
+- B.1.2. Command: baseline recipe + `BB_ARENA_GIB=4` (replace 8).
+- B.1.3. Watch for, in the log:
+  - `outside the macOS guest arena` → coverage was insufficient. Invalid run; retry with
+    `BB_ARENA_GIB=12`, then back to 8. Record the smallest that boots.
+  - the `Mem[vk]:` usage number: a drop of ≈ 4 GiB proves arenas are counted in usage.
+  - menu FPS from the 5 s `Frame stats` lines.
+- B.1.4. Decision:
+  - Menu ≥ 30 FPS and no `Stall:` lines ≥ 100 ms → **primary success**; adopt E1 config and
+    go to B.4 (combine with B.3), skipping B.2.
+  - Some improvement but stalls remain → adopt if no crash; continue to B.2.
+
+#### B.2 E2 — Make the texture cache responsive earlier
+- B.2.1. Rationale: usage (10.4 GiB) sits above the 80% pressure mark but the cache evicted
+  nothing. Force it to act well before the heap ceiling.
+- B.2.2. Command: E-best + `BB_GC_BUDGET_MB=6144 BB_GC_IDLE_SECONDS=5`
+  (ladder if needed: 8192 → 4096).
+- B.2.3. Watch for:
+  - `Mem[vk]:` usage dropping to ≲ 7 GiB → textures were a large part of it.
+  - `0 images evicted` **still** printed → images cannot be freed (they're GPU-written /
+    kept); usage comes from buffers/arenas; record and move on — more texture budget won't
+    help; Phase D.1 decides the fix.
+  - visible pop-in / re-upload churn (image upload MB/s in the frame stats) — if violent,
+    raise the budget one step.
+- B.2.4. Decision: keep the smallest budget that lowers usage without heavy re-upload
+  churn; otherwise revert and rely on B.1/B.3.
+
+#### B.3 E3 — Render below native: the 720p patch path (biggest GPU-side lever)
+- B.3.1. Rationale: `bbport.ini` (preset 1) describes rendering the whole frame at
+  1280x720 → FSR3 → 1080p. `BB_LIVE_RES=1` overrides that into the live path, which renders
+  the scene at guest 1080p and pays proxy copies. On a pixel-bound low-end GPU, the patch
+  path is both **less GPU work and less render-target memory**. It needs a slightly bigger
+  pool than the live path's default, but the 9152 MiB that `run.sh` auto-exports is sized
+  for *above*-1080p patches; at 720p, start from 5056 and climb if entry fails.
+- B.3.2. Command: E-best + `BB_LIVE_RES=0 BB_DMEM_MB=5056` (drop nothing else).
+- B.3.3. Verify from the run banner: `Output 1920x1080: scene 1280x720, direct memory 5056 MiB`.
+- B.3.4. Failure ladder at entry (`out of memory` guest-side, crash at boot):
+  `BB_DMEM_MB=6144`, then `7168`. Validity: must reach the Dream.
+- B.3.5. Watch for: FPS at equal draw counts vs. E1/E2; render-target-related device usage
+  should shrink (check `Mem[vk]:`).
+
+#### B.4 E4 — Combine the winners
+- B.4.1. Take: arena setting from B.1, GC setting from B.2 (if kept), `BB_LIVE_RES=0` +
+  `BB_DMEM_MB` from B.3.
+- B.4.2. Run, record, compare against the best single-change run.
+- B.4.3. If the combination regresses (e.g., pool + arenas + GC interact), drop the last
+  adopted change and re-run once.
+
+#### B.5 E5 (optional) — Single-process comparison `BB_GPU_PROCESS=0`
+- B.5.1. The split host adds IPC/fault-relay overhead; on a small machine it might not pay.
+  Run the B.4 config with `BB_GPU_PROCESS=0` once.
+- B.5.2. Only adopt if clearly better; the split is the maintained default.
+
+#### B.6 E6 (optional, last resort) — wired limit
+- B.6.1. `sudo sysctl iogpu.wired_limit_mb=14336` before launching (revert after reboot).
+  Tests whether the driver could use more wired memory than the default ≈ 12 GiB.
+- B.6.2. If system-wide memory pressure worsens, abandon; this machine's total RAM is the
+  hard wall.
+
+#### Gate B — choose the story
+- **G1 (memory was it):** menu ≥ 30 FPS, Dream ≥ 24 FPS; `Mem[vk]:` below the pressure
+  mark; no long stalls → proceed to Phase C (GPU tuning).
+- **G2 (partial):** stalled but better; usage still pinned high → run A.2 instrumentation,
+  then Phase D.1/D.2 as indicated.
+- **G3 (theory wrong):** menu ≤ 5 FPS with usage low and no swap → stop, profile instead:
+  `sample bbgpu-host 30 -file /tmp/bb-sample-plan.txt` during a stall, plus
+  `sudo powermetrics --samplers gpu_power -i 2000 -n 10` to see GPU busy%; bring the
+  stacks back for analysis (Phase D.4 becomes the main line).
+
+### Phase C — GPU-side tuning (only after Gate B/G1)
+
+Fixed protocol: use the best B config; measure at the Dream lamp (repeatable) unless noted.
+
+- C.1 **Resolution ladder.** Preset 2 (≈ 1080/1.7 ≈ 635p) and preset 3 (540p) via
+  `BB_UPSCALE_PRESET` (restart per change on the patch path). Record FPS vs preset.
+  Pick the smallest loss for the target FPS; expect this to matter more than anything else
+  on this GPU.
+- C.2 **Tessellation cost** (diagnostic): `BB_DROP_TESS=1` for one run. On M4 Max it was
+  +4.6 FPS at 1440p; expect proportionally more here if GPU-bound. If it's a big win,
+  file "emulate tessellation ourselves" higher in the backlog (already noted).
+- C.3 **Copy-shader / pass-split cost:** already known to be structural ("copy shader" pass
+  splits); skip for now unless C.1/C.2 leave the GPU idle.
+- C.4 Keep the shader-compile skip; re-check `0 compiles` in the stats lines. If new-area
+  stutters appear, that's the background compile pool doing its job — note, don't fix here.
+
+### Phase D — Conditional code work (only what Gate B/G2/G3 triggers)
+
+- **D.1 Usage is buffers/arenas, not textures** (B.2 showed `0 evicted` while usage > mark).
+  - D.1.1. Re-read `Mem[vk]:` composition (A.2) and `ZeroCopy:` lines.
+  - D.1.2. If arenas dominate: on-demand page arenas (backlog item) or auto-size
+    `MacArenaPages` from the driver budget at startup (`instance.GetTotalMemoryBudget()`
+    < 16 GiB → fewer pages). Implementation: `buffer_cache.cpp:104-122`.
+  - D.1.3. If imports dominate and churn (evicts high): raise/scale `kMaxBytes`
+    (`zerocopy.cpp:31`, currently 2 GiB) with the driver budget, or make imports survive
+    longer (they're the *saving* mechanism). Measure hits/fallbacks/evicts before/after.
+- **D.2 Import fallbacks are high** (`ZeroCopy: no single view covers …` in logs).
+  - D.2.1. Inspect the specific addresses; the range crosses mirror views or exceeds
+    `kMaxImport` (1 GiB) — decide whether the arena must cover those or the import code
+    should handle multiple views per request.
+- **D.3 EOP fences signalled at GPU completion** (correctness prerequisite for long
+  zero-copy sessions; backlog has it under Fence waits / zero-copy). Implement before
+  trusting hour-long sessions; validate with a save/load walk.
+- **D.4 Device loss under pressure** (`vk_presenter.cpp:784 GetDrawing… Assertion Failed!
+  Device lost` at the end of `/tmp/bb-cap.log`).
+  - D.4.1. Re-test after B; if it persists, capture the full stderr block and the MoltenVK
+    env in effect; check whether any allocation fails around the loss (add an
+    `vkAllocateMemory` failure log if needed).
+
+### Phase E — Validation & wrap-up
+
+- E.1 **Extended validation:** 15-minute session on the final config (menu → Dream →
+  Yharnam, some combat); acceptance: no `Device lost`, no `outside arena`, no unforced
+  `Stall:` ≥ 200 ms after warm-up; FPS windows recorded.
+- E.2 **Regression spot checks** (from the backlog): reload-save legs/foot check, area
+  transition, settings persistence (exit with menu open).
+- E.3 **Docs & backup:**
+  - E.3.1. Update `docs/M2PRO_PERF_PLAN.md` results table + `PROJECT_MAP.md` status line
+    + `docs/MACOS_BACKLOG.md` entries that this work resolves.
+  - E.3.2. Commit harness + instrumentation + doc. Consider pushing `zerocopy-m2` (7
+    commits are currently only on this disk).
+- E.4 (optional, separate discussion) upstream/PR strategy for the fork's commits.
+
+---
+
+## 4. Results table (fill as runs complete)
+
+| # | Config delta | Log | Menu FPS | Dream FPS | City FPS | median ms | worst ms | Mem[vk] usage | swap used peak | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base | current recipe (arena 8, live, zero-copy) | /tmp/bb-plan-base.log | 1–2 | — | — | ~550 | 2408 | 10421 MiB | | reproduces |
+| E1 | + `BB_ARENA_GIB=4` | | | | | | | | | |
+| E2 | + `BB_GC_BUDGET_MB=6144 BB_GC_IDLE_SECONDS=5` | | | | | | | | | |
+| E3 | + `BB_LIVE_RES=0 BB_DMEM_MB=5056` | | | | | | | | | |
+| E4 | combination | | | | | | | | | |
+
+---
+
+## 5. Appendix A — command recipes
+
+Base (Phase A.3, live path):
+```sh
+BB_GAME_DIR=/Users/onur/Bloodborne/CUSA03173 \
+BB_GPU_PROCESS=1 BB_ARENA_GIB=8 BB_HIGH_DPI=0 BB_FRAME_STATS=1 \
+BB_SHADER_COMPILE=skip BB_UPSCALER=fsr3 BB_UPSCALE_PRESET=1 \
+BB_ZERO_COPY=1 BB_LIVE_RES=1 bash run.sh 2>&1 | tee /tmp/bb-plan-base.log
+```
+
+Experiment template (only the deltas change):
+```sh
+BB_GAME_DIR=/Users/onur/Bloodborne/CUSA03173 \
+BB_GPU_PROCESS=1 BB_HIGH_DPI=0 BB_FRAME_STATS=1 BB_SHADER_COMPILE=skip \
+BB_UPSCALER=fsr3 BB_UPSCALE_PRESET=1 BB_ZERO_COPY=1 \
+<delta env vars> bash run.sh 2>&1 | tee /tmp/bb-plan-<tag>.log
+```
+
+Post-run extraction:
+```sh
+grep -E "Frame stats:|Frame pacing:|Texture cache:|Stall:|Mem\[vk\]:|ZeroCopy:" /tmp/bb-plan-<tag>.log | tail -60
+grep -cE "outside the macOS guest arena|Device lost" /tmp/bb-plan-<tag>.log
+```
+
+GPU utilization during a stall (optional, needs sudo):
+```sh
+sudo powermetrics --samplers gpu_power -i 2000 -n 10
+```
+
+---
+
+## 6. Appendix B — log line cheat sheet
+
+- `Frame stats: <F> FPS, worst frame <W> ms … GPU thread <X> us/draw, <N> draws/frame` —
+  the headline. Healthy: X in the tens–hundreds of µs; N·X well under a frame. Current: 3k–44k µs.
+- `Frame timeline (ms/frame): recording thread busy …; command thread waiting for recording …;
+  flip submit -> GPU done …` — where the second goes. `waiting for recording` ≫ 1 ms is the
+  starvation signature.
+- `Stall: <W> ms frame; GPU thread on CPU <C> ms …` — printed for frames > 40 ms.
+- `Texture cache: memory pressure, <used> of <pressure MiB> MiB (critical <crit>)` —
+  `<used>` is *total Vulkan device usage* (not just textures); `<pressure>` = 80% and
+  `<crit>` = 88% of the driver budget (≈ 12,124 MiB here).
+- `vblank 480 Hz` — marker of the uncapped present mode (`BB_FPS=uncap`), not a display mode.
+- `ZeroCopy: …` — one-shot diagnostics from the import path (e.g. fallback reasons).
+
+---
+
+## 7. Appendix C — code pointers
+
+| Topic | File:line |
+|---|---|
+| Arena setup | `gpu/shadps4/video_core/buffer_cache/buffer_cache.cpp:95-123` |
+| Arena page constants | `gpu/shadps4/video_core/buffer_cache/buffer_cache.h:45-53` |
+| Zero-copy import path | `gpu/shadps4/video_core/buffer_cache/zerocopy.cpp` (caps at 28-32, gates 34-40, Obtain 60-…, EnforceCaps 259) |
+| Zero-copy integration in the cache | `buffer_cache.cpp:~357` |
+| Texture GC marks + print | `gpu/shadps4/video_core/texture_cache/texture_cache.cpp:1008-1200` |
+| Pool size (`BB_DMEM_MB`) | `src/runtime_memory.c:25-35` |
+| Patch/live path selection | `run.sh:96-132`; `scripts/patches.py:136-157` (preset scales at line 24) |
+| arm64 GPU lib build | `scripts/macos/build_gpu_arm64.sh` → `out/gpu-arm64/libbbgpu.dylib` |
+
+---
+
+## 8. Open questions (decide when we get there)
+
+1. If 720p-class rendering is required for playable FPS, is that acceptable visually
+   (FSR3 → 1080p)? If not, the GPU-time work (pass merging, tessellation) moves up.
+2. Push the fork's 7 local commits after Phase B (backup), or keep local for now?
+3. Time budget for Phase D code work vs. accepting the Phase B/C result as "playable enough".
