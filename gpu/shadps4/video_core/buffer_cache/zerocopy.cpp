@@ -128,20 +128,14 @@ const Buffer* ZeroCopy::Import(BufferCache* owner, VAddr addr, u64 span, u64 phy
     const u32 allowed = req.memoryTypeBits;
     const vk::PhysicalDeviceMemoryProperties mem_props =
         instance.GetPhysicalDevice().getMemoryProperties();
+    // Imported memory must be host-visible; on MoltenVK that is the shared
+    // (non-device-local) type. Pick the first host-visible set bit.
     u32 type = UINT32_MAX;
     for (u32 i = 0; i < mem_props.memoryTypeCount; ++i) {
-        if (!(allowed & (1u << i))) {
-            continue;
-        }
-        if (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal) {
-            type = i;
-            break;
-        }
-    }
-    for (u32 i = 0; type == UINT32_MAX && i < mem_props.memoryTypeCount; ++i) {
         if ((allowed & (1u << i)) &&
             (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)) {
             type = i;
+            break;
         }
     }
     if (type == UINT32_MAX) {
