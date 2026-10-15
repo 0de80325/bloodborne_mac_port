@@ -401,6 +401,8 @@ private:
     u64 total_used_memory = 0;
     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
     std::chrono::steady_clock::time_point gc_report_time{};
+    /// bbport: last "Mem[vk]" report (every 5 s, BB_FRAME_STATS or not).
+    std::chrono::steady_clock::time_point mem_report_time{};
     /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
     std::array<u64, 64> gc_tick_at_second{};
     u64 gc_second = 0;

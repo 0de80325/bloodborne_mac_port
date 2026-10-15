@@ -45,6 +45,18 @@ public:
         return bytes;
     }
 
+    /// bbport: counters for the periodic device-memory report (Mem[vk]: line).
+    struct Stats {
+        u64 bytes = 0, hits = 0, imports = 0, fallbacks = 0, evicts = 0;
+    };
+    Stats stats() const {
+        return {bytes,
+                hits.load(std::memory_order_relaxed),
+                imports.load(std::memory_order_relaxed),
+                fallbacks.load(std::memory_order_relaxed),
+                evicts.load(std::memory_order_relaxed)};
+    }
+
 private:
     struct Entry {
         Buffer buffer;

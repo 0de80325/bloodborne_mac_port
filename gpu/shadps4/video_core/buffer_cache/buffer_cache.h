@@ -82,6 +82,13 @@ public:
         return stream_buffer;
     }
 
+#ifdef __APPLE__
+    /// bbport: zero-copy import counters (zeros until the import path is first used).
+    ZeroCopy::Stats GetZeroCopyStats() const {
+        return zerocopy ? zerocopy->stats() : ZeroCopy::Stats{};
+    }
+#endif
+
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;

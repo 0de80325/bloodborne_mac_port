@@ -1168,6 +1168,27 @@ void TextureCache::GarbageCollectImages() {
             gc_evictions = gc_downloads = 0;
         }
     }
+
+#ifdef __APPLE__
+    // bbport: device-memory composition every 5 s, so the zero-copy/arena balance is
+    // visible in every run's log before the pressure marks are reached.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - mem_report_time >= std::chrono::seconds(5)) {
+            mem_report_time = now;
+            const auto zc = buffer_cache.GetZeroCopyStats();
+            std::printf(
+                "Mem[vk]: usage %llu of budget %llu MiB (trigger %llu); zerocopy %llu MiB, "
+                "hits %llu imports %llu fallbacks %llu evicts %llu; images %zu\n",
+                (unsigned long long)(total_used_memory >> 20),
+                (unsigned long long)(instance.GetDeviceMemoryBudgetNow() >> 20),
+                (unsigned long long)(trigger_gc_memory >> 20),
+                (unsigned long long)(zc.bytes >> 20), (unsigned long long)zc.hits,
+                (unsigned long long)zc.imports, (unsigned long long)zc.fallbacks,
+                (unsigned long long)zc.evicts, slot_images.size());
+        }
+    }
+#endif
 }
 
 void TextureCache::GarbageCollectSamplers() {
