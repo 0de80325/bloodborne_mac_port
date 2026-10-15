@@ -131,8 +131,9 @@ Details:
 ## Download (no building needed)
 
 Ready-made builds are attached to the [releases](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases)
-as `Bloodborne-macOS-<version>.zip` (about 50 MB). You still need **your own game dump** (see
-below): no game files are included.
+as `Bloodborne-macOS-<version>.zip` (about 50 MB). It needs an Apple Silicon Mac with macOS 15
+or newer and **at least 16 GB of memory**. You still need **your own game dump** (see below): no
+game files are included.
 
 1. Unzip it and move **`Bloodborne.app`** to Applications (or anywhere).
 2. **Release it from quarantine.** The app is not signed with an Apple developer certificate,
@@ -174,7 +175,7 @@ example a 60 FPS patch made for jailbroken consoles) is rejected: this port appl
 
 ## Requirements (building from source)
 
-- A Mac with **Apple Silicon** running **macOS 15 or newer**
+- A Mac with **Apple Silicon** running **macOS 15 or newer**, with at least **16 GB** of memory
 - **Rosetta 2** (`softwareupdate --install-rosetta`)
 - **Xcode Command Line Tools** (`xcode-select --install`)
 - **Homebrew** (arm64) with build tools:
