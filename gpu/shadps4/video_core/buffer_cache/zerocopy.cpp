@@ -121,13 +121,34 @@ const Buffer* ZeroCopy::Import(BufferCache* owner, VAddr addr, u64 span, u64 phy
         return nullptr;
     }
     const vk::MemoryRequirements req = dev.getBufferMemoryRequirements(buf);
-    // MoltenVK's unified types are all host-visible; the first set bit works
-    // (the spike verified bytes both directions on this machine).
+    // The import only accepts host-visible types for this pointer; prefer a
+    // device-local one (unified memory: both, when offered).
+    u32 allowed = req.memoryTypeBits;
+    {
+        vk::MemoryHostPointerPropertiesEXT props;
+        if (dev.getMemoryHostPointerPropertiesEXT(
+                vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT,
+                reinterpret_cast<void*>(start), &props) == vk::Result::eSuccess &&
+            props.memoryTypeBits) {
+            allowed &= props.memoryTypeBits;
+        }
+    }
+    const vk::PhysicalDeviceMemoryProperties mem_props =
+        instance.GetPhysicalDevice().getMemoryProperties();
     u32 type = UINT32_MAX;
-    for (u32 i = 0; i < 32; ++i) {
-        if (req.memoryTypeBits & (1u << i)) {
+    for (u32 i = 0; i < mem_props.memoryTypeCount; ++i) {
+        if (!(allowed & (1u << i))) {
+            continue;
+        }
+        if (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal) {
             type = i;
             break;
+        }
+    }
+    for (u32 i = 0; type == UINT32_MAX && i < mem_props.memoryTypeCount; ++i) {
+        if ((allowed & (1u << i)) &&
+            (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)) {
+            type = i;
         }
     }
     if (type == UINT32_MAX) {
