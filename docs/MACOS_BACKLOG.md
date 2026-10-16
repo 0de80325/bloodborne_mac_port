@@ -195,6 +195,13 @@ Each item: what was done for now, what the refinement is, and where it lives.
   0x263b246) instead of a clean exit. Only test runs with a timeout are affected; normal play
   has none. *Refinement:* find why the dump signal derails the interrupted guest thread
   (signal delivery under Rosetta with the guest stack/TLS) and exit cleanly.
+- **Geometry-shader draws missing on MoltenVK: dog cages in Central Yharnam (user, 2026-10-16).**
+  MoltenVK has no geometry stage, so every EsGs draw is skipped (`vk_pipeline_cache.cpp:763`,
+  "Geometry shader stage unsupported, skipping": 3457 times in one session), and one GS pipeline
+  fails in SPIRV-Cross (`PerVertexKHR decoration is not supported in MSL`, rejected, draws
+  skipped). The cages show only faint outlines around the dogs. *Fix:* the native Metal renderer
+  (`metal-backend`, 0.5.0) emulates GS with compute kernels; confirm the cages there with the
+  same scene (MoltenVK vs Metal screenshots). Not yet proven that the cages are the GS draws.
 - **Character half-rendered after reloading a save (user report, 2026-10-11).** Repro: quit to the
   main menu, reload the save point; the character loads with the top half drawn and the bottom
   half missing. Suspects: pipelines skipped on Metal (`Graphics pipeline … rejected`, geometry
