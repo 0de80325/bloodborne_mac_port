@@ -95,6 +95,7 @@ if [[ ${1:-} == --test ]]; then
     /usr/bin/clang++ -std=c++20 -O1 -Wall -Wextra -Igpu/shim tests/test_settings_keep.cpp \
         gpu/shim/bbport_settings.cpp -o out/settings-keep-test
     out/settings-keep-test
+    bash tests/test_launch_settings.sh
     # Shared control block rings between bb-probe (x86-64) and bbgpu-host (arm64).
     /usr/bin/clang -arch x86_64 -arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET -std=c11 -O2 -g \
         -Wall -Wextra -Werror -I. tests/test_bbgpu_rings.c -o out/bbgpu-rings-test

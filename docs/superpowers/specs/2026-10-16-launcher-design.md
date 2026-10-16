@@ -100,10 +100,9 @@ Settings are saved when Play is pressed (and when the window closes), not on eve
 
 - **`BB_SAVE_DIR`** (`src/runtime_savedata.c`): when set, saves live in `$BB_SAVE_DIR` instead of
   `<user>/savedata` (the two places that build that path). Unset: unchanged.
-- **`fps_cap` in `bbport.ini`** (`run.sh`): mapped to the existing controls. 30: no frame rate
-  patch (`BB_FPS=30`). 60: the 60 FPS patch (`BB_FPS=60`). 90: the 90 FPS preset (`BB_FPS=90`).
-  40 and 120: the uncapped patch with the sprint fix (`BB_FPS=uncap`) and `BB_FPS_LIMIT=40` /
-  `120`. No key: today's behaviour. An explicit `BB_FPS` / `BB_FPS_LIMIT` environment variable
+- **`fps_cap` in `bbport.ini`** (`run.sh`): mapped to the existing controls. Every cap keeps run.sh's default frame rate patch (uncapped,
+  delta time) and sets the presenter's limit `BB_FPS_LIMIT=<cap>` (decided while planning: the
+  shipped and tested path). No key: today's behaviour. An explicit `BB_FPS` / `BB_FPS_LIMIT` environment variable
   still wins. The exact mapping is checked against the log during implementation (the patch name
   and the present limit are both logged).
 - **`fullscreen` in `bbport.ini`** (`run.sh`): exports `BB_FULLSCREEN=1`; the window code already

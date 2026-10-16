@@ -89,6 +89,7 @@ EOF
 # Launch scripts and patches (run.sh runs them; BB_PREBUILT=1 skips building).
 install -m755 run.sh "$contents/Resources/port/"
 install -m644 scripts/*.py "$contents/Resources/port/scripts/"
+install -m644 scripts/launch_settings.sh "$contents/Resources/port/scripts/"
 cp -R patches "$contents/Resources/port/patches"
 
 # Python.
