@@ -100,8 +100,8 @@ enum Layout: Equatable {
         }
     }
 
-    /// The environment scripts/macos/app_launcher.sh set (release app) or Bloodborne.app's
-    /// earlier launcher (checkout), plus the save folder. Display settings reach the game through
+    /// The environment the earlier bash launchers set (release app, checkout app), plus the save
+    /// folder. Display settings reach the game through
     /// bbport.ini (run.sh: scripts/launch_settings.sh), not here.
     func launchPlan(gameDir: URL, saveDir: URL?, dataDir: URL, env: [String: String]) -> LaunchPlan {
         var environment = env
