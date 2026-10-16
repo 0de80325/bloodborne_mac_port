@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showWindow() {
         NSApp.setActivationPolicy(.regular)
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 760),
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: LauncherView.size),
                                   styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
             window.title = "Bloodborne"
             window.contentView = NSHostingView(rootView: LauncherView(model: model))

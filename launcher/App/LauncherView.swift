@@ -2,64 +2,52 @@
 import SwiftUI
 
 struct LauncherView: View {
+    /// The window's content size (main.swift).
+    static let size = CGSize(width: 920, height: 680)
+
     @ObservedObject var model: LauncherModel
-    @State private var advanced = false
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section("Display") {
-                    Picker("Output resolution", selection: $model.settings.output) {
-                        ForEach(model.outputChoices, id: \.self) { Text($0.description).tag($0) }
-                    }
-                    Picker("Window", selection: $model.settings.fullscreen) {
-                        Text("Windowed").tag(false)
-                        Text("Full screen").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    Picker("Frame rate cap", selection: $model.settings.frameCap) {
-                        ForEach(FrameCap.allCases) { Text($0.label).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    if model.settings.frameCap.rawValue > 60 {
-                        Text("Above 60 FPS is experimental: the game was made for 30. 120 needs a 120 Hz display.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Section("Upscaler") {
-                    Picker("Upscaler", selection: $model.settings.upscaler) {
-                        ForEach(model.upscalerChoices) { Text($0.label).tag($0) }
-                    }
-                    Picker("Quality", selection: $model.settings.preset) {
-                        ForEach(Resolution.presetNames.indices, id: \.self) { Text(Resolution.presetNames[$0]).tag($0) }
-                    }
-                    .disabled(!model.settings.upscaler.usesPreset)
-                    LabeledContent("Renders", value: "\(model.settings.renderSize) → \(model.settings.output)")
-                    if model.settings.upscaler == .fsr3 {
-                        Toggle("Sharpening", isOn: $model.settings.sharpen)
-                        if model.settings.sharpen {
-                            Slider(value: $model.settings.sharpness, in: 0...2) { Text("Strength") }
+            // Two columns so the whole window fits a 13" MacBook Air (1440 x 900 points, Dock shown)
+            // without scrolling, even with every optional row showing.
+            HStack(alignment: .top, spacing: 0) {
+                Form {
+                    Section("Display") {
+                        Picker("Output resolution", selection: $model.settings.output) {
+                            ForEach(model.outputChoices, id: \.self) { Text($0.description).tag($0) }
+                        }
+                        Picker("Window", selection: $model.settings.fullscreen) {
+                            Text("Windowed").tag(false)
+                            Text("Full screen").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        Picker("Frame rate cap", selection: $model.settings.frameCap) {
+                            ForEach(FrameCap.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        if model.settings.frameCap.rawValue > 60 {
+                            Text("Above 60 FPS is experimental: the game was made for 30. 120 needs a 120 Hz display.")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                }
-                Section("Effects") {
-                    ForEach(GameSettings.visualEffects) { effect in
-                        Toggle(effect.label, isOn: Binding(get: { model.effect(effect.key) },
-                                                           set: { model.setEffect(effect.key, $0) }))
+                    Section("Upscaler") {
+                        Picker("Upscaler", selection: $model.settings.upscaler) {
+                            ForEach(model.upscalerChoices) { Text($0.label).tag($0) }
+                        }
+                        Picker("Quality", selection: $model.settings.preset) {
+                            ForEach(Resolution.presetNames.indices, id: \.self) { Text(Resolution.presetNames[$0]).tag($0) }
+                        }
+                        .disabled(!model.settings.upscaler.usesPreset)
+                        LabeledContent("Renders", value: "\(model.settings.renderSize) → \(model.settings.output)")
+                        if model.settings.upscaler == .fsr3 {
+                            Toggle("Sharpening", isOn: $model.settings.sharpen)
+                            if model.settings.sharpen {
+                                Slider(value: $model.settings.sharpness, in: 0...2) { Text("Strength") }
+                            }
+                        }
                     }
-                    Toggle("Show FPS", isOn: $model.settings.showFPS)
-                    Toggle("Skip intro videos", isOn: Binding(get: { model.effect("skip_intro") },
-                                                              set: { model.setEffect("skip_intro", $0) }))
-                }
-                Section("Locations") {
-                    FolderRow(title: "Game folder", path: model.config.gameDir?.path ?? "Not chosen",
-                              problem: model.checkingGame ? nil : model.gameProblem,
-                              choose: model.chooseGameFolder, reset: model.resetGameFolder)
-                    FolderRow(title: "Save folder", path: model.saveDir.path, problem: model.saveProblem,
-                              choose: model.chooseSaveFolder, reset: model.resetSaveFolder)
-                }
-                Section {
-                    DisclosureGroup("Advanced", isExpanded: $advanced) {
+                    Section("Advanced") {
                         if model.layout.hasMetalRenderer {
                             Picker("Renderer", selection: $model.settings.renderer) {
                                 ForEach(Renderer.allCases) { Text($0.label).tag($0) }
@@ -70,8 +58,27 @@ struct LauncherView: View {
                         }
                     }
                 }
+                .formStyle(.grouped)
+                Form {
+                    Section("Effects") {
+                        ForEach(GameSettings.visualEffects) { effect in
+                            Toggle(effect.label, isOn: Binding(get: { model.effect(effect.key) },
+                                                               set: { model.setEffect(effect.key, $0) }))
+                        }
+                        Toggle("Show FPS", isOn: $model.settings.showFPS)
+                        Toggle("Skip intro videos", isOn: Binding(get: { model.effect("skip_intro") },
+                                                                  set: { model.setEffect("skip_intro", $0) }))
+                    }
+                    Section("Locations") {
+                        FolderRow(title: "Game folder", path: model.config.gameDir?.path ?? "Not chosen",
+                                  problem: model.checkingGame ? nil : model.gameProblem,
+                                  choose: model.chooseGameFolder, reset: model.resetGameFolder)
+                        FolderRow(title: "Save folder", path: model.saveDir.path, problem: model.saveProblem,
+                                  choose: model.chooseSaveFolder, reset: model.resetSaveFolder)
+                    }
+                }
+                .formStyle(.grouped)
             }
-            .formStyle(.grouped)
             Divider()
             HStack(spacing: 12) {
                 Toggle("Show launcher every time", isOn: $model.config.showLauncher)
@@ -89,7 +96,7 @@ struct LauncherView: View {
             }
             .padding()
         }
-        .frame(width: 600, height: 760)
+        .frame(width: LauncherView.size.width, height: LauncherView.size.height)
     }
 }
 
@@ -109,6 +116,7 @@ private struct FolderRow: View {
                 Button("Reset to Default", action: reset)
             }
             Text(path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                .lineLimit(1).truncationMode(.middle).help(path)
             if let problem {
                 Text(problem).font(.caption).foregroundStyle(.red)
             }
