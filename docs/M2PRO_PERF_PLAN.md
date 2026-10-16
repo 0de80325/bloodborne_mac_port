@@ -1,15 +1,29 @@
 # M2 Pro Performance Plan — Memory first, then GPU
 
-Status: **draft plan** (2026-10-15). Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2`.
+Status: **paused** (2026-10-16 — game session banked, sampler stopped, everything pushed).
+Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2` (origin == local; `upstream/master` at
+`8f4418d`, the exact tip we merged — nothing newer as of this date).
 Machine: Apple M2 Pro, 16 GB RAM (12 GiB GPU heap), macOS 27.0.1.
-Current state: ~1–3 FPS (median frame 550–990 ms, worst 1.3–4.8 s) with the launch recipe below.
-Engine: 2026-10-16 merged upstream `mac-v0.3.3` — MoltenVK argument buffers off by default
-(+13–16% on M4 Max), arena clamped to the Mac's largest Metal buffer, host range diagnostics.
-Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy phase 1. Baseline and
-E1–E6 run on this merged engine.
-Goal: **playable framerates on this machine** — intermediate target ≥ 30 FPS in menus,
-≥ 24 FPS in the Hunter's Dream and ≥ 20 FPS in Central Yharnam at 720p-class render
-(FSR3 → 1080p output); final target whatever this GPU's ceiling turns out to be.
+Engine: 2026-10-16 merged upstream `mac-v0.3.3` (merge commit `5292f9e` + docs `7636a23`,
+pushed). Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy phase 1.
+
+**Resume here → Phase 0, step G1:** reboot, start the baseline run with
+`BB_TOGGLE_FILE=$PWD/out/toggles` (file created, currently `0`), stand in the heavy view, turn
+the camera (smears expected), then flip bit `16777216` (FSR off) / `33554432` (jitter off) and
+re-test — one run, no restarts.
+Smoke result (no reboot, dirty machine): **menus 60–82 FPS** (was 0.4–1.9), light scene 60,
+plaza (1764 draws) 23.9, per-draw recording 20.9–2166 µs (was 3.1k–44k). **The merge was the
+fix — MoltenVK argument buffers were the primary pathology, not memory.**
+Open problems (ordered):
+1. **Visual glitches (confirmed by the user):** the 3D world smears/washes/blacks out while
+   the camera **moves**; a stationary camera renders correctly (proven by `bb-still1..6.png`
+   vs `bb-bad1..8.png` in the temp dir). Points at the temporal/upscaler path (FSR 3.1 +
+   live-res, window resized mid-session) — see **Phase 0**. Zero-copy churn stays suspect #2.
+2. Heavy areas: a later area (1542 draws/frame) ran 9–10 FPS — GPU 78% busy *and* recording
+   ~63 µs/draw, ~49 ms/frame kernel time under swap → heaviness + memory overcommit (§ B
+   stays relevant for long sessions).
+Goal: **playable framerates + a correct image on this machine** — ≥ 30 FPS menus,
+≥ 24 FPS Dream / ≥ 20 FPS Central Yharnam at 720p-class render (FSR3 → 1080p output).
 
 The plan is ordered so that **cheap configuration experiments come first** (no rebuilds),
 instrumentation and code changes only where a measurement says they're needed.
@@ -17,6 +31,12 @@ instrumentation and code changes only where a measurement says they're needed.
 ---
 
 ## 0. TL;DR of the diagnosis (why we think 3 FPS is not "M2 Pro too weak")
+
+> **Verdict, 2026-10-16 — partially falsified; kept for history.** The merge (MoltenVK
+> argument buffers off by default) alone took menus from 0.4–1.9 to 60–82 FPS on this box,
+> so the dominant pathology was the argument-buffer path on M2-class GPUs, not the memory
+> system. The footprint experiments (Phase B) stay relevant only for the long-session creep
+> (swap / kernel time) and are now demoted below the glitch investigation (Phase 0).
 
 Evidence from this machine's logs (`/tmp/bb-zc6.log`, `/tmp/bb-zc7.log`, `/tmp/bb-cap.log`):
 
@@ -88,6 +108,42 @@ Current `bbport.ini`: `upscaler=fsr3`, `preset=1`, `output_res=1920x1080`,
 
 ## 3. The plan
 
+### Phase 0 — Glitch investigation (2026-10-16, new top priority)
+
+Evidence (all frames in the temp dir `.../opencode/`):
+- `bb-burst4.png` — user-confirmed smear frame (camera turning).
+- `bb-scene.png` — window-direct capture, camera still: **correct** interior image, 21 FPS.
+- `bb-bad1..8.png` — camera turning: horizontal smears, black frames, a full-screen cream wash.
+- `bb-still1..6.png` — same bad view, camera stationary: **correct** (dark, grainy) image,
+  8–9 FPS at 1527 draws.
+
+**Finding (2026-10-16):** the wild frames happen while the camera **moves**; a stationary
+camera renders a correct image. So this is a **temporal/upscaler artifact, not broken
+geometry**. The port's upscaler notes list the matching gaps: motion vectors exist only for
+static geometry ("missing: motion of animated objects, cloth, foliage; reactive/transparency
+masks for particles and fog; render-resolution scaling"). We run FSR 3.1 (720p → 1080p) on
+the live path with a mid-session-resized window (2560×1410) — the most suspect combination
+(upstream hit a cousin bug: "upscaler not running while jitter stayed on → stretched scene
+frame shifted each phase").
+
+Test order (one variable per run; the baseline run should start with `BB_TOGGLE_FILE=$PWD/out/toggles`,
+file created with `0` — live A/B, no restarts):
+- **G1 (live, one run):** while the user turns the camera in the bad view, flip `1<<24` (FSR 3.1
+  off), then `1<<25` (jitter off), capturing frames before/after each flip. Clean image after a
+  flip → upscaler/jitter implicated; then pick the config (MetalFX vs FSR vs patch path) and re-test.
+- **G2 window hygiene:** all runs at 1920×1080; never resize mid-session.
+- **F1 `BB_ZERO_COPY=0`** — suspect #2 (long session, ~4.7M import/evict events; EOP-fence
+  correctness open). Test if G1 is inconclusive or smears persist.
+- **F2 `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1`** — isolates the merge's changed path
+  (also repro material for upstream issue #2).
+- **F3 `BB_SHADER_COMPILE=wait`** — only if the artifact is missing pieces, not smears.
+
+Heavy-view note: the same view costs 8–9 FPS even stationary (1527 draws, GPU ticks ~78%,
+~66 µs/draw recording, ~108 tessellation-emulated draws/frame: 49.5 tessellated + 58.7
+rect/quad-list; Mem[vk] pinned at the 12.1 GiB budget, zero-copy churn ended at 5.7M
+imports ≈ evicts, swap peak 6.2 GB) — the old B-phase problem, to attack after the smear is
+understood (`BB_DROP_TESS=1` will quantify the tessellation share).
+
 ### Phase A — Harness, baseline, and the one instrumentation we need
 
 #### A.1 Create the memory sampler (5 min, no rebuild)
@@ -143,8 +199,11 @@ This is additive (a print), so it cannot change behavior beyond log volume.
   BB_GAME_DIR=/Users/onur/Bloodborne/CUSA03173 \
   BB_GPU_PROCESS=1 BB_ARENA_GIB=8 BB_HIGH_DPI=0 BB_FRAME_STATS=1 \
   BB_SHADER_COMPILE=skip BB_UPSCALER=fsr3 BB_UPSCALE_PRESET=1 \
-  BB_ZERO_COPY=1 BB_LIVE_RES=1 bash run.sh 2>&1 | tee /tmp/bb-plan-base.log
+  BB_ZERO_COPY=1 BB_LIVE_RES=1 BB_TOGGLE_FILE=$PWD/out/toggles \
+  bash run.sh 2>&1 | tee /tmp/bb-plan-base.log
   ```
+  (create the toggles file first: `mkdir -p out && echo 0 > out/toggles`; Phase 0 G1 flips
+  bits in it live: `16777216` = FSR off, `33554432` = jitter off, `50331648` = both.)
   In a second terminal start the sampler:
   `bash tools/m2perf/sample_mem.sh /tmp/bb-plan-base-mem.tsv`
 - A.3.3. Follow the § 1.4 play script; quit the game; Ctrl-C the sampler.
@@ -155,8 +214,11 @@ This is additive (a print), so it cannot change behavior beyond log volume.
   # Memory samples peak:
   sort -t$'\t' -k3 -nr /tmp/bb-plan-base-mem.tsv | head -3
   ```
-- A.3.5. **Gate A:** if the baseline does **not** reproduce ~1–2 FPS, stop and re-run; the
-  machine state matters (other apps, previous swap). If it reproduces, continue.
+- A.3.5. **Gate A (post-merge):** the pre-merge 1–2 FPS expectation is obsolete. A valid
+  baseline shows menus ≥ 50 FPS and scene numbers like the smoke row (§ 4). If it is far
+  below, check machine state (other apps, swap) and re-run before blaming the engine.
+  No window resizing during the run — a resize re-creates the swapchain/live targets
+  mid-session (seen 2026-10-16).
 
 ### Phase B — Footprint experiments (no code, one variable at a time)
 
@@ -295,7 +357,11 @@ Fixed protocol: use the best B config; measure at the Dream lamp (repeatable) un
 
 | # | Config delta | Log | Menu FPS | Dream FPS | City FPS | median ms | worst ms | Mem[vk] usage | swap used peak | Verdict |
 |---|---|---|---|---|---|---|---|---|---|---|
-| base | current recipe (arena 8, live, zero-copy) | /tmp/bb-plan-base.log | 1–2 | — | — | ~550 | 2408 | 10421 MiB | | reproduces |
+| base | recipe (arena 8, live, zero-copy) — **pre-merge** | /tmp/bb-plan-base.log | 1–2 | — | — | ~550 | 2408 | 10421 MiB | | superseded by smoke |
+| smoke | merged engine, same recipe, no reboot (dirty) | /tmp/bb-merge-smoke.log | 60–82 | 60 light / 23.9 plaza (1764 draws) | 9–10 heavy area (1542 draws; GPU 78%, kernel ~49 ms/frame) | 105–123 | 3156 (scene load) | 12230 MiB of 12124 budget; swap 6.2 GB | **merge = the fix**; new: smears (Phase 0) + heavy-area cost |
+| F1 | smoke + `BB_ZERO_COPY=0` | | | | | | | | pending |
+| F2 | smoke + `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` | | | | | | | | pending |
+| F3 | smoke + `BB_SHADER_COMPILE=wait` | | | | | | | | pending |
 | E1 | + `BB_ARENA_GIB=4` | | | | | | | | | |
 | E2 | + `BB_GC_BUDGET_MB=6144 BB_GC_IDLE_SECONDS=5` | | | | | | | | | |
 | E3 | + `BB_LIVE_RES=0 BB_DMEM_MB=5056` | | | | | | | | | |
