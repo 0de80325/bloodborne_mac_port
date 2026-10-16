@@ -151,8 +151,66 @@ do {
     try? fm.removeItem(at: root)
 }
 
+// Layout and launch plans.
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("launcher-layout-\(getpid())")
+    let app = root.appendingPathComponent("Bloodborne.app")
+    let contents = app.appendingPathComponent("Contents")
+    let port = contents.appendingPathComponent("Resources/port")
+    try? fm.createDirectory(at: port, withIntermediateDirectories: true)
+    check(Layout.detect(bundleURL: app, info: [:]) == nil, "no run.sh, no repository: not a launcher bundle")
+    let repo = root.appendingPathComponent("my repo")
+    try? fm.createDirectory(at: repo, withIntermediateDirectories: true)
+    let checkout = Layout.detect(bundleURL: app, info: ["BBRepository": repo.path])
+    check(checkout == .checkout(repo: repo, app: app), "checkout app")
+    try? Data().write(to: port.appendingPathComponent("run.sh"))
+    let packaged = Layout.detect(bundleURL: app, info: ["BBRepository": repo.path])
+    check(packaged == .packaged(contents: contents), "packaged app (run.sh inside wins)")
+
+    check(!packaged!.hasMetalRenderer, "no Metal marker")
+    try? Data().write(to: port.appendingPathComponent("metal-renderer"))
+    check(packaged!.hasMetalRenderer, "Metal marker")
+
+    let home = URL(fileURLWithPath: "/Users/h")
+    let defaultData = home.appendingPathComponent("Library/Application Support/Bloodborne")
+    let env = ["HOME": home.path, "PATH": "/usr/bin:/bin"]
+    check(packaged!.launchConfURL(env: env) == defaultData.appendingPathComponent("launch.conf"), "packaged launch.conf in the data folder")
+    check(checkout!.launchConfURL(env: env) == repo.appendingPathComponent("launch.conf"), "checkout launch.conf in the repository")
+    check(checkout!.launchConfURL(env: env.merging(["BB_LAUNCH_CONF": "/tmp/t.conf"]) { $1 }).path == "/tmp/t.conf", "BB_LAUNCH_CONF")
+    check(packaged!.dataDir(env: env, config: LaunchConfig()) == defaultData, "default data folder")
+    check(packaged!.dataDir(env: env.merging(["BB_DATA_DIR": "/x"]) { $1 }, config: LaunchConfig()).path == "/x", "BB_DATA_DIR")
+    check(checkout!.dataDir(env: env, config: LaunchConfig(ini: IniFile(text: "BB_DATA_DIR=/y\n"))).path == "/y", "launch.conf BB_DATA_DIR")
+    check(Logs.folder(home: home).path == "/Users/h/Library/Logs/Bloodborne", "logs folder")
+
+    let game = URL(fileURLWithPath: "/Games/My CUSA03173")
+    let p = packaged!.launchPlan(gameDir: game, saveDir: nil, dataDir: defaultData, env: env)
+    check(p.executable.path == "/bin/bash" && p.arguments == [port.appendingPathComponent("run.sh").path], "packaged runs its run.sh")
+    check(p.environment["BB_GAME_DIR"] == game.path && p.environment["BB_DATA_DIR"] == defaultData.path, "game and data folder")
+    check(p.environment["BB_PREBUILT"] == "1" && p.environment["BB_PROBE"] == contents.appendingPathComponent("MacOS/bb-probe").path, "prebuilt probe")
+    check(p.environment["PYTHON"] == contents.appendingPathComponent("Resources/python/bin/python3").path, "bundled Python")
+    check(p.environment["VK_DRIVER_FILES"] == port.appendingPathComponent("MoltenVK_icd.json").path, "bundled MoltenVK")
+    check(p.environment["BB_SAVE_DIR"] == nil && p.directory.path == port.path, "default saves; runs in port")
+    let saves = URL(fileURLWithPath: "/Volumes/Drive/Hunter's saves")
+    let c = checkout!.launchPlan(gameDir: game, saveDir: saves, dataDir: defaultData, env: env.merging(["BB_SAVE_DIR": "/stale"]) { $1 })
+    check(c.arguments == [repo.appendingPathComponent("run.sh").path] && c.directory.path == repo.path, "checkout runs the repository's run.sh")
+    check(c.environment["BB_SAVE_DIR"] == saves.path && c.environment["BB_PREBUILT"] == nil, "chosen saves; builds")
+    check(c.environment["BB_GPU_HOST"] == app.appendingPathComponent("Contents/MacOS/bbgpu-host").path, "game window from the app (Dock icon)")
+    check(c.environment["BB_DATA_DIR"] == nil, "checkout: run.sh picks the data folder unless set")
+    check(c.environment["PATH"]?.hasPrefix("/opt/homebrew/bin:") == true, "checkout: Homebrew tools for the rebuild")
+    let cd = checkout!.launchPlan(gameDir: game, saveDir: nil, dataDir: defaultData, env: env.merging(["BB_DATA_DIR": "/z"]) { $1 })
+    check(cd.environment["BB_DATA_DIR"] == "/z" && cd.environment["BB_SAVE_DIR"] == nil, "explicit data folder passes; stale save folder removed")
+    check(packaged!.gameCheckCommand == [contents.appendingPathComponent("Resources/python/bin/python3").path, port.appendingPathComponent("scripts/game_check.py").path], "packaged game check")
+    check(checkout!.gameCheckCommand == ["/usr/bin/env", "python3", repo.appendingPathComponent("scripts/game_check.py").path], "checkout game check")
+    try? fm.createDirectory(at: root.appendingPathComponent("CUSA03173"), withIntermediateDirectories: true)
+    try? Data().write(to: root.appendingPathComponent("CUSA03173/eboot.bin"))
+    check(checkout!.defaultGameDir()?.path == root.appendingPathComponent("CUSA03173").path, "checkout default: ../CUSA03173")
+    check(packaged!.defaultGameDir() == nil, "packaged: no default game folder")
+    try? fm.removeItem(at: root)
+}
+
 if failures > 0 {
     print("FAIL: launcher model, \(failures) failed")
     exit(1)
 }
-print("PASS: launcher model (ini, resolutions, settings, launch.conf, saves)")
+print("PASS: launcher model (ini, resolutions, settings, launch.conf, saves, launch plan)")
