@@ -3,6 +3,10 @@
 Status: **draft plan** (2026-10-15). Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2`.
 Machine: Apple M2 Pro, 16 GB RAM (12 GiB GPU heap), macOS 27.0.1.
 Current state: ~1–3 FPS (median frame 550–990 ms, worst 1.3–4.8 s) with the launch recipe below.
+Engine: 2026-10-16 merged upstream `mac-v0.3.3` — MoltenVK argument buffers off by default
+(+13–16% on M4 Max), arena clamped to the Mac's largest Metal buffer, host range diagnostics.
+Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy phase 1. Baseline and
+E1–E6 run on this merged engine.
 Goal: **playable framerates on this machine** — intermediate target ≥ 30 FPS in menus,
 ≥ 24 FPS in the Hunter's Dream and ≥ 20 FPS in Central Yharnam at 720p-class render
 (FSR3 → 1080p output); final target whatever this GPU's ceiling turns out to be.
@@ -64,7 +68,7 @@ M2 Pro GPU ≈ ⅓ of an M4 Max. A sane port should do ~20–25 FPS at 1080p nat
 
 | Knob | Default | What it does | Where |
 |---|---|---|---|
-| `BB_ARENA_GIB` | 16 (4 × 4 GiB pages) | Size of the fallback device-local arenas; any multiple of 4, capped at 24. Current runs use **8** (2 pages). | `gpu/.../buffer_cache/buffer_cache.cpp:107-111`, `buffer_cache.h:52` |
+| `BB_ARENA_GIB` | 16 (4 × 4 GiB pages) | Size of the fallback device-local arenas; any multiple of 4, then clamped to the largest Metal buffer (on this 16 GB Mac that is 2 pages = **8 GiB**, so 8/16/24 all give 8; use 4 for one page). Current runs use 8 = the default here. | `gpu/.../buffer_cache/buffer_cache.cpp:107-133`, `buffer_cache.h:45-53` |
 | `BB_ZERO_COPY` | off | Serves buffer binds by importing pool pages (`VK_EXT_external_memory_host`) instead of copying into an arena. Import caps: 256 entries / 2 GiB / single import ≤ 1 GiB. | `gpu/.../buffer_cache/zerocopy.cpp:28-40` |
 | `BB_DMEM_MB` | 5056 | Guest direct memory ("pool"). Range 5056–16384. `run.sh` exports **9152** for the patch path unless overridden. | `src/runtime_memory.c:25-35`, `run.sh:130` |
 | `BB_LIVE_RES=1` | (ini: 0) | Live path: guest renders 1080p, host scales at runtime. Leave unset (=ini 0) → patch path: whole frame renders at preset size (1280x720 at preset 1) and the upscaler fills 1080p. | `run.sh:96-132`, `scripts/patches.py:136-157` |
