@@ -104,11 +104,33 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const u64 first_page = MacArenaBase >> ARENA_PAGE_BITS;
     // BB_ARENA_GIB (multiple of 4): smaller arenas for tools that snapshot every buffer (Metal
     // frame capture fails on the full size).
-    const u64 arena_pages = [] {
+    const u64 wanted_pages = [] {
         const char* env = std::getenv("BB_ARENA_GIB");
         const u64 gib = env ? std::strtoull(env, nullptr, 10) : 0;
         return gib >= 4 ? std::min<u64>(gib / 4, 6) : MacArenaPages;
     }();
+    // One Metal buffer is limited to maxBufferLength, about 60% of the Mac's memory (28 GiB
+    // with 48 GB; ~9 GiB with 16 GB; upstream mac-v0.3.3). Each arena below is 4 GiB, so the
+    // limit only bites below 4 GiB (8 GB Macs): stop with the limit named. The clamp also keeps
+    // the default at 8 GiB on a 16 GB Mac, where a bare 16 GiB of guest arena would not fit the
+    // ~12 GiB heap budget. BB_MAX_BUFFER_GIB pretends a lower limit (testing).
+    u64 max_buffer = instance.GetPhysicalDevice()
+                         .getProperties2<vk::PhysicalDeviceProperties2,
+                                         vk::PhysicalDeviceMaintenance4Properties>()
+                         .get<vk::PhysicalDeviceMaintenance4Properties>()
+                         .maxBufferSize;
+    if (const char* env = std::getenv("BB_MAX_BUFFER_GIB")) {
+        max_buffer = std::min<u64>(max_buffer, std::strtoull(env, nullptr, 10) << 30);
+    }
+    const u64 arena_pages = std::min<u64>(wanted_pages, max_buffer >> ARENA_PAGE_BITS);
+    ASSERT_MSG(arena_pages > 0,
+               "This Mac's GPU allows buffers of {:.1f} GiB; each guest arena needs 4 GiB (a "
+               "Mac with at least 16 GB of memory)",
+               double(max_buffer) / double(1_GB));
+    std::printf("GPU arena: %llu GiB in %llu x 4 GiB (largest Metal buffer on this Mac: %.1f GiB)\n",
+                (unsigned long long)(arena_pages << ARENA_PAGE_BITS >> 30),
+                (unsigned long long)arena_pages, double(max_buffer) / double(1_GB));
+    mac_arena_end = MacArenaBase + (arena_pages << ARENA_PAGE_BITS);
     const auto* first_arena = &arenas.emplace_back(instance, MacArenaBase, ARENA_PAGE_SIZE,
                                                        MemoryType::DeviceLocal, "Guest Arena");
     address_space[first_page] = first_arena;
@@ -457,8 +479,9 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const auto* last_arena = address_space[last_page];
 #ifdef __APPLE__
     ASSERT_MSG(first_arena && first_arena == last_arena,
-               "GPU buffer {:#x}..{:#x} outside the macOS guest arena",
-               first_block << block_shift, ((last_block + 1) << block_shift) - 1);
+               "GPU buffer {:#x}..{:#x} outside the macOS guest arena (ends at {:#x}; limited by "
+               "this Mac's largest Metal buffer)",
+               first_block << block_shift, ((last_block + 1) << block_shift) - 1, mac_arena_end);
 #endif
     if (first_arena == last_arena) {
         if (!first_arena) {

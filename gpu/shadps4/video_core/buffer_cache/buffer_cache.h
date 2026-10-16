@@ -50,6 +50,7 @@ class BufferCache {
 #ifdef __APPLE__
     static constexpr u64 MacArenaBase = 0x7000000000; ///< runtime_memory.c USER_MIN (macOS)
     static constexpr u64 MacArenaPages = 4; ///< 16 GiB of guest GPU address space (BB_ARENA_GIB)
+    u64 mac_arena_end = 0; ///< end of the arena (smaller where Metal buffers are limited)
 #endif
 
 public:

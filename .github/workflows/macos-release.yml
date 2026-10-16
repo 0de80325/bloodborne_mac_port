@@ -51,11 +51,15 @@ jobs:
           [[ $GITHUB_REF_TYPE == tag ]] || version=dev-$(git rev-parse --short HEAD)
           bash scripts/macos/package_app.sh "$version"
           echo "ZIP=dist/Bloodborne-macOS-$version.zip" >> "$GITHUB_ENV"
+          bash tools/pkg_extract/build_release.sh dist/pkg_extract
+          (cd dist && ditto -c -k pkg_extract pkg_extract-macOS.zip)
 
       - uses: actions/upload-artifact@v4
         with:
           name: Bloodborne-macOS
-          path: ${{ env.ZIP }}
+          path: |
+            ${{ env.ZIP }}
+            dist/pkg_extract-macOS.zip
 
       - name: Attach to the release
         if: github.ref_type == 'tag'
@@ -64,4 +68,4 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
               gh release create "$GITHUB_REF_NAME" --prerelease --title "$GITHUB_REF_NAME" --notes "See README.md."
-          gh release upload "$GITHUB_REF_NAME" "$ZIP" --clobber
+          gh release upload "$GITHUB_REF_NAME" "$ZIP" dist/pkg_extract-macOS.zip --clobber

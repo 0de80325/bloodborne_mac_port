@@ -17,30 +17,32 @@ process.
 
 ## Status (2026-10-14)
 
-**Current version: [mac-v0.3.0](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases/tag/mac-v0.3.0)** (source only; build it as below).
+**Current version: [mac-v0.3.3](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases/tag/mac-v0.3.3)** (download the app, or build it as below).
 
 **Work in progress, playable.** On an Apple M4 Max the game boots, character creation works,
-saves load, and Central Yharnam runs at a **locked 60 FPS** at 1080p — natively or with MetalFX
-upscaling. Expect occasional rendering glitches (see [Known issues](#known-issues)).
+saves load, and the game runs at a **locked 60 FPS** at 1080p and 1440p native, or upscaled with
+MetalFX or FSR 3.1. Expect occasional rendering glitches (see [Known issues](#known-issues)).
 
 The target is a locked 60 FPS (the game's physics run at 30 Hz, so more is not wanted), at the
-highest resolution each Mac allows. Measured on the M4 Max, frame rate uncapped:
+highest resolution each Mac allows. Measured on the M4 Max with mac-v0.3.3, frame rate uncapped
+(Hunter's Dream headstone):
 
-| Output | Renders at | FPS | Limited by |
-|---|---|---|---|
-| 1080p, MetalFX Quality | 1280×720 | 65–77 | — (60 locked) |
-| 1080p native | 1920×1080 | 61–63 | GPU timeline (render-pass overhead) |
-| 4K, MetalFX Performance | 1916×1078 | ~52 | GPU / pacing |
-| 1440p native | 2560×1440 | 49 | GPU (~17.5 ms/frame; 60 needs ≤ 15) |
-| 4K, MetalFX Quality | 2560×1440 | 43 | GPU |
+| Output | Renders at | FPS uncapped |
+|---|---|---|
+| 1080p, FSR 3.1 Quality | 1280×720 | ~107 |
+| 1080p, MetalFX Quality | 1280×720 | ~106 |
+| 1080p native | 1920×1080 | ~94 |
+| 1440p native | 2560×1440 | ~66 |
+
+At the usual 60 FPS cap all of these hold a steady 60 with even frame pacing.
 
 Goals: M4 Max 1440p native and 4K upscaled at 60; base M5 1080p native; smaller Macs 1080p
 upscaled.
 
-### From 22 to 60 FPS
+### From 22 to 94 FPS
 
 The first playable build (2026-10-11) ran the first level at **~22 FPS** at native 1080p. What
-got it to 60, roughly in order:
+got it to 60 and beyond, in order:
 
 | Change | Effect |
 |---|---|
@@ -52,6 +54,8 @@ got it to 60, roughly in order:
 | **No "precise" float math in pixel/compute shaders.** SPIR-V `NoContraction` became `[[clang::optnone]]` helper calls for every float operation in Metal (223 of 308 shaders) | City respawn spot **39 → 60 FPS**, GPU 19.6 → 12.1 ms per frame |
 | Shader permutation fix (Metal rejected ~6 pipelines per session, their draws vanished); unnamed pooled command buffers (MoltenVK labelled every encoder, ~4% CPU) | Correct image; less CPU per frame |
 | **Shaders compile on background threads** (4 low-priority threads). Option `shader_compile=wait` (brief hitch, complete image), `skip` (no hitch, an object may pop in) or `balanced` (default: waits up to 6 ms per frame, then skips) in `bbport.ini` and the in-game menu | Level load with an empty cache: render thread compile time 440 → 130 ms; worst frame 248 → 76 ms with `skip`. Walking into new areas with slow (cold) compiles: 15 frames frozen 120–190 ms with `wait`, one 41 ms frame with `balanced` |
+| **MoltenVK encodes while we record** (prefilled Metal command buffers) instead of encoding the whole frame inside the flip's submit (~13 ms) | Judder: late game frames **~6× fewer**; the "solid 60" feel |
+| **No Metal argument buffers in MoltenVK** (push descriptors bound directly; the tip came from [Huax-1839/bloodborne-macos](https://github.com/Huax-1839/bloodborne-macos)) | **+13–16%** everywhere: 1080p native 82 → 94, 1440p native 59 → 66 (above 60 for the first time), FSR/MetalFX 92 → 107 |
 
 Also fixed along the way: a MoltenVK crash from two threads sharing one command pool, and
 geometry corruption at 1440p (scenes above 1080p now use live resolution changes).
@@ -131,8 +135,9 @@ Details:
 ## Download (no building needed)
 
 Ready-made builds are attached to the [releases](https://github.com/Wooloomooloo2/bloodborne_mac_port/releases)
-as `Bloodborne-macOS-<version>.zip` (about 50 MB). You still need **your own game dump** (see
-below): no game files are included.
+as `Bloodborne-macOS-<version>.zip` (about 50 MB). It needs an Apple Silicon Mac with macOS 15
+or newer and **at least 16 GB of memory**. You still need **your own game dump** (see below): no
+game files are included.
 
 1. Unzip it and move **`Bloodborne.app`** to Applications (or anywhere).
 2. **Release it from quarantine.** The app is not signed with an Apple developer certificate,
@@ -152,13 +157,29 @@ a small Python for the launch scripts). Saves and settings go to
 `~/Library/Application Support/Bloodborne`, the log to `~/Library/Logs/Bloodborne/game.log`.
 To choose a different game folder, delete `launch.conf` in the save folder.
 
+**Preparing the game folder from PKG files.** The app needs an unpacked folder, not `.pkg`
+files. If you already play on shadPS4 you have one: use that folder, but first copy the
+contents of the update folder next to it (`CUSA03173-patch` or similar) into it, replacing
+files. To unpack decrypted (fake-signed) PKGs, download `pkg_extract-macOS.zip` from the same
+release, unzip it and, in Terminal from that folder:
+
+```sh
+xattr -d com.apple.quarantine pkg_extract
+./pkg_extract /path/to/base-game.pkg ~/Bloodborne        # creates ~/Bloodborne/CUSA03173
+./pkg_extract /path/to/update-1.09.pkg ~/Bloodborne-update
+ditto ~/Bloodborne-update/CUSA03173 ~/Bloodborne/CUSA03173   # merge the update over the game
+```
+
+Retail PKGs (from the PlayStation Store or a disc install) are encrypted with console keys and
+must be dumped on a jailbroken PS4 first; no Mac tool can unpack them.
+
 **The game files must be the original 1.09 executable.** A pre-patched `eboot.bin` (for
 example a 60 FPS patch made for jailbroken consoles) is rejected: this port applies its own
 60 FPS patches in memory at start, so use the unmodified `eboot.bin` from the 1.09 update.
 
 ## Requirements (building from source)
 
-- A Mac with **Apple Silicon** running **macOS 15 or newer**
+- A Mac with **Apple Silicon** running **macOS 15 or newer**, with at least **16 GB** of memory
 - **Rosetta 2** (`softwareupdate --install-rosetta`)
 - **Xcode Command Line Tools** (`xcode-select --install`)
 - **Homebrew** (arm64) with build tools:

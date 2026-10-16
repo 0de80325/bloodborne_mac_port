@@ -689,3 +689,113 @@ the title screen at 60 FPS. The bundled Python runs `game_check.py`; a one-byte 
 eboot.bin is rejected as `wrong_eboot` with the pre-patched-executable explanation.
 Pre-existing, unrelated: `tests/test_run_settings.py` fails one case on master (third launch
 gets 640x360 instead of the live path at 1080p).
+
+## 2026-10-15: "buffer.cpp:105" on Macs with less memory
+
+Reported from a player's Mac (and seen on the GitHub CI VM): the start stops at
+`Failed allocating buffer with error ErrorOutOfDeviceMemory` (buffer.cpp:105). The macOS buffer
+cache maps the guest GPU range as one 16 GiB Metal buffer, and one Metal buffer is limited to
+`maxBufferLength`, about 60% of the Mac's memory (28.1 GiB with 48 GB): Macs with less than about
+28 GB could not start. The game's GPU memory sits in the first few GiB: the city walk ran
+correctly with `BB_ARENA_GIB=4`. The arena now shrinks to the largest multiple of 4 GiB that fits
+(log line "GPU arena: N GiB"); `BB_MAX_BUFFER_GIB=9` (a 16 GB Mac) gave 8 GiB and a clean walk.
+Below 4 GiB (8 GB Macs) it stops with a message naming the limit.
+
+## 2026-10-15: M2 Max at 2–3 FPS (issue #2)
+
+The log shows `bbgpu-host: cannot reserve the guest range 0x7000000000-0xfc00000000 (got 0x7b8e400000)`
+on every launch: something already occupies the start of the guest range in the arm64 host on that
+Mac, so the game falls back to single-process mode. That fallback is not the slowdown by itself:
+recreating it here (`BBGPU_TEST_BLOCK_RANGE=1`, the host maps 1 MiB at 0x7000000000 first) still
+walked the city at 60 FPS (worst frames 18–44 ms vs 16.7 ms with `BB_GPU_PROCESS=0`). They also
+tried 640x360 with FSR and 720p without, still slow, so it is not GPU resolution. The host now lists
+the regions in the way (address, size, VM tag, file) when the reservation fails. Waiting for a log
+with that and `BB_FRAME_STATS=1`.
+
+## 2026-10-15: sizing a native Metal back end (split mode, prefill on, M4 Max)
+
+Central Yharnam respawn spot after loading the test save, standing, uncapped
+(`BB_PRESENT_MODE=Immediate BB_FPS_LIMIT=0`), upscaler off; `sample` of `bbgpu-host` for 8 s
+and a 3 s Metal System Trace in the same run.
+
+| | 1440p native (live) | 1080p native |
+|---|---|---|
+| FPS uncapped | 55–58 | 71–77 |
+| GPU busy per frame | 14.6 ms (vertex 5.3, fragment 9.3, compute 1.7) | 10.8 ms (vertex 5.3, fragment 4.9, compute 1.7) |
+| GPU idle per frame | ~3.1 ms; 2.6 ms in ~4 stalls inside the prefilled command buffer | ~2.9 ms; 2.3 ms in ~3 stalls |
+| Metal encoders per frame | ~409 | ~409 |
+| `bb:VkRecorder` busy | 47% (MoltenVK 6.1, AGX driver 10.0, Metal/IOGPU/objc 5.7, malloc 3.0, memcpy etc. 6.3, ours 11.7) | 54% (MoltenVK 8.2, AGX 11.8, Metal/IOGPU/objc 7.8, malloc 4.0, memcpy etc. 8.2, ours 9.9) |
+| `bb:DrawRec` busy | 26% (ours 20) | 30% (ours 24) |
+| `GpuCommandProcessor` busy | 15% | 21% |
+
+Reading:
+- **On the M4 Max no CPU thread is saturated**: the GPU timeline sets the frame rate. The
+  recording thread is about half MoltenVK + Apple's driver; a Metal back end would roughly halve
+  its cost. That matters on slower CPUs (M1/M2, and the rival port, which is CPU-bound) more
+  than here.
+- **GPU idle (~3 ms/frame) is MoltenVK's**: the same stalls located on 2026-10-15 night
+  (tessellation emulation, after an image copy, command-buffer boundary, between compute
+  encoders). Our own encoding would avoid them.
+- **Vertex time is 5.3 ms at both resolutions**: geometry, binning and pass structure, not pixels.
+  ~409 encoders/frame (190 render passes at ~13–16 µs each, ~3 ms) plus re-binning per pass;
+  merging passes needs control over pass boundaries and load/store actions that Metal gives us
+  directly.
+- **Estimate**: removing the idle stalls and merging the needless passes (~1–2 ms) takes 1440p
+  from ~17.7 ms to ~13–14 ms per frame (~72–77 FPS uncapped; 60 locked with headroom), and
+  1080p from ~13.7 to ~10–11 ms. Fragment shading itself does not change.
+
+## 2026-10-15: head to head with Huax-1839/bloodborne-macos (direct Metal renderer)
+
+Their port (GPL-2.0, single x86-64 process under Rosetta, a ~20k-line Metal back end, default on
+macOS 15+) built here at ee3120a (one local change: two macOS 27 SDK lines guarded for the 26.5
+SDK, frame interpolation only). Same protocol for both (`cmp.sh`): the same test save (Hunter's
+Dream headstone), 1920x1080 native, upscaler off, uncapped (`BB_PRESENT_MODE=Immediate
+BB_FPS_LIMIT=0`), title + 30 s, Cross twice, mean of the last six 5-s windows after 75 s in game,
+warm shader caches, runs interleaved. Screenshots: same scene, same image.
+
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| **Ours** (split mode, MoltenVK, prefill) | 80.9 | 81.1 | 82.6 |
+| Theirs, Metal | 53.1 | 52.7 | |
+| Theirs, Vulkan (MoltenVK) | 44.4 | 44.4 | |
+| Ours, `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` | 94.0 | | |
+
+- Ours is ~53% faster than their Metal renderer and ~83% faster than their MoltenVK path here.
+  Their shaders keep `NoContraction` on every float op and compile with `MTLMathModeSafe` (the
+  cost we removed on 2026-10-13), and their renderer runs translated in the game process.
+- **Their MoltenVK tip works for us too:** argument buffers off gave 82.6 → 94.0 FPS (+14%),
+  image correct. Not yet the default (Backlog: check 1440p, the city, pacing and the
+  menus/upscalers first).
+
+### MoltenVK argument buffers off, A/B (2026-10-15 evening)
+
+Same protocol as the head to head (Hunter's Dream, uncapped, alternating), `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`:
+
+| | on (MoltenVK default) | off |
+|---|---|---|
+| 1080p native | 80.9, 81.1, 82.6 | 94.0 |
+| 1440p native (live) | 58.6, 58.7 | 66.2, 65.9 |
+| 1080p FSR 3.1 Quality | 92.6 | 107.1 |
+| 1080p MetalFX Quality | 91.8 | 106.2 |
+
+Capped at 60 (walk route, 2 runs each): late game frames 0.7–0.9 per 5 s (on) vs 1.0 (off), late
+display frames 6–8 vs 4–6: the same. Screenshots correct (native, FSR, MetalFX). 8 walks with it
+as the default: all clean. **Now the default** (`bbgpu_init`; the environment overrides). 1440p
+native is above 60 FPS uncapped for the first time.
+
+### Head to head with DiAvisoo/bbport-mac-optimized v0.1.0 (2026-10-15 night)
+
+A fork of bmy/bbport-mac (`macos-native-0.5`: KosmicKrisp, native arm64 GPU process), released as
+"M2 optimised" (tested on an M2 Max: 50–60 FPS at 1080p, 30–40 at 32:9). Their release app's engine
+run headless with their launcher's profile (`BB_NATIVE_GPU=1 BB_SKIP_EMPTY_DRAWS=1
+BB_VK_RECORD_THREADS=1 BB_FRAMES_AHEAD=2 BB_GPU_QOS=1 …`), isolated data folder, same protocol and
+save as the Huax-1839 comparison (1080p native, upscaler off, uncapped, alternating):
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| **Ours** (mac-v0.3.3 code) | 94.2 | 94.4 |
+| DiAvisoo v0.1.0 | 73.3 | 74.4 |
+
+Ours ~28% faster on the M4 Max; same scene, both 1920x1080, image correct in both. Their ~74 here is
+consistent with their 50–60 on an M2 Max, which suggests ours would do ~65–75 there, and that issue
+#2's 2–3 FPS on an M2 Max is a bug in ours, not the hardware.

@@ -33,6 +33,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <libproc.h>
 
 void say(const char *format, ...) {
     char line[512];
@@ -339,6 +340,28 @@ static uint64_t first_occupied(uint64_t from) {
  * every extra byte is odds against ASLR-placed system mappings in the range. */
 #define HOST_IMAGE_SLACK UINT64_C(0x20000000)
 
+/* Names what already occupies the guest range when the reservation fails (upstream mac-v0.3.3:
+ * the full-range reservation failed on an M2 Max, issue #2). */
+static void report_guest_range(void) {
+    mach_vm_address_t at = BBGPU_GUEST_MIN;
+    for (int n = 0; n < 16; ++n) {
+        mach_vm_size_t size = 0;
+        vm_region_extended_info_data_t info;
+        mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &at, &size, VM_REGION_EXTENDED_INFO,
+                           (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS ||
+            at >= BBGPU_GUEST_MAX)
+            return;
+        char file[PATH_MAX] = "";
+        proc_regionfilename(getpid(), at, file, sizeof file);
+        say("  in the way: 0x%" PRIx64 "-0x%" PRIx64 " (%" PRIu64 " MiB) tag %u prot %d %s",
+            (uint64_t)at, (uint64_t)(at + size), (uint64_t)(size >> 20), info.user_tag,
+            info.protection, file);
+        at += size;
+    }
+}
+
 static int reserve_prefix(uint64_t pool_span) {
     const uint64_t need =
         (pool_span + HOST_IMAGE_SLACK + BBGPU_GUEST_PAGE - 1) & ~(BBGPU_GUEST_PAGE - 1);
@@ -347,6 +370,7 @@ static int reserve_prefix(uint64_t pool_span) {
         say("guest range blocked at 0x%" PRIx64 " (need 0x%" PRIx64 " for the 0x%" PRIx64
             "-byte pool): single-process",
             first, need, pool_span);
+        report_guest_range();
         return ENOMEM;
     }
     void *at = mmap((void *)BBGPU_GUEST_MIN, (size_t)need, PROT_NONE,
@@ -354,6 +378,7 @@ static int reserve_prefix(uint64_t pool_span) {
     if (at != (void *)BBGPU_GUEST_MIN) {
         say("cannot reserve the guest prefix 0x%" PRIx64 "-0x%" PRIx64 ": %s", BBGPU_GUEST_MIN,
             BBGPU_GUEST_MIN + need, at == MAP_FAILED ? strerror(errno) : "misplaced");
+        report_guest_range();
         return ENOMEM;
     }
     reservation_end = BBGPU_GUEST_MIN + need;
@@ -381,6 +406,11 @@ int main(void) {
      * low, first-fit from the base) instead of demanding the whole range. MAP_FIXED would
      * silently replace those mappings, so the prefix is walked first and views above it
      * fail gracefully (host_runtime.c) rather than clobber host memory. */
+    /* BBGPU_TEST_BLOCK_RANGE=1 (upstream mac-v0.3.3, testing) occupies the start of the range,
+     * as seen on an M2 Max (issue #2), to exercise the blocked-prefix path and the report. */
+    const char *block = getenv("BBGPU_TEST_BLOCK_RANGE");
+    if (block && !strcmp(block, "1"))
+        mmap((void *)BBGPU_GUEST_MIN, 1 << 20, PROT_READ, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
     int status = reserve_prefix(entry_size);
     if (!status) status = map_shared();
     /* The entry must be mappable here (send right valid, size as announced). */
