@@ -366,7 +366,7 @@ Each item: what was done for now, what the refinement is, and where it lives.
 
 ## 3. Mac GUI
 
-- **Native launcher app (user, 2026-10-15).** A SwiftUI launcher (game folder with the check,
+- **Native launcher app (user, 2026-10-15). Done 2026-10-16 (mac-v0.4.0, `launcher/`).** A SwiftUI launcher (game folder with the check,
   settings, log, play/stop), designed so other games can be added later. bmy/bbport-mac has one
   (`launcher-macos/`, GPL-2.0) for reference.
 
