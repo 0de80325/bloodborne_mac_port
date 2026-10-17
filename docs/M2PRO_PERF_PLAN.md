@@ -11,6 +11,20 @@ pushed). Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy ph
 `BB_TOGGLE_FILE=$PWD/out/toggles` (file created, currently `0`), stand in the heavy view, turn
 the camera (smears expected), then flip bit `16777216` (FSR off) / `33554432` (jitter off) and
 re-test — one run, no restarts.
+
+**Upstream watch (2026-10-17).** The original repo released **mac-v0.4.0** (2026-10-16): the
+SwiftUI launcher (fullscreen, FPS cap 30–120, upscaler/effects/skip-intro settings, save folder
+handling) — release notes say *performance is the same as 0.3.3*; master has 15 commits since
+our merge, all launcher/ini/run.sh (`BB_FPS_LIMIT`, `BB_FULLSCREEN`, `BB_SAVE_DIR`, settings
+keep unknown keys). The `metal-native` branch is the future **0.5.0 native Metal renderer** (112
+commits, still active as of 2026-10-17 06:13): TAA/MetalFX/FSR 3.1 on Metal, motion passes,
+compute-emulated geometry-shader draws (the ones MoltenVK skips) — but currently **~11% slower
+than 0.4.0**, GPU-bound, the gap diagnosed as Metal hazard tracking on the guest arena + fault
+buffer (experiments with those untracked reach ~110–120 FPS). M2-class slowness is upstream
+**issue #2** (M2 Max at 2–3 FPS): acknowledged as their bug, they expect ~65–75 FPS at 1080p on
+an M2 Max once fixed. Our machine reserves the guest range and runs the split GPU process
+normally (no fallback), so if we still see 9–21 FPS in-game it is worth comparing against a
+stock 0.4.0 run and/or contributing our `BB_FRAME_STATS` log to issue #2.
 Smoke result (no reboot, dirty machine): **menus 60–82 FPS** (was 0.4–1.9), light scene 60,
 plaza (1764 draws) 23.9, per-draw recording 20.9–2166 µs (was 3.1k–44k). **The merge was the
 fix — MoltenVK argument buffers were the primary pathology, not memory.**
