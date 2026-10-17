@@ -1,22 +1,25 @@
 # M2 Pro Performance Plan — Memory first, then GPU
 
-Status: **paused** (2026-10-16 — game session banked, sampler stopped, everything pushed).
-Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2` (origin == local; `upstream/master` at
-`8f4418d`, the exact tip we merged — nothing newer as of this date).
+Status: **active** (resumed 2026-10-17 — merged upstream **mac-v0.4.0**, the launcher, into the
+fork and rebuilt all three binaries; renderer unchanged, release notes say performance is the
+same as 0.3.3, so our Phase 0 work carries over).
+Repo: fork `bloodborne_mac_port`, branch `zerocopy-m2` (`origin` has the 0.3.3 merge; the
+2026-10-16/17 notes + the 0.4.0 merge are local until pushed).
 Machine: Apple M2 Pro, 16 GB RAM (12 GiB GPU heap), macOS 27.0.1.
-Engine: 2026-10-16 merged upstream `mac-v0.3.3` (merge commit `5292f9e` + docs `7636a23`,
-pushed). Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy phase 1.
+Engine: upstream merges `mac-v0.3.3` (`5292f9e`, 2026-10-16) and `mac-v0.4.0` (`5521d99`,
+2026-10-17: launcher, `BB_FPS_LIMIT`/`BB_FULLSCREEN`/`BB_SAVE_DIR`, settings keep unknown
+keys). Our parts kept: prefix reservation, per-page 4 GiB arenas, zero-copy phase 1.
 
 **Resume here → Phase 0, step G1:** reboot, start the baseline run with
 `BB_TOGGLE_FILE=$PWD/out/toggles` (file created, currently `0`), stand in the heavy view, turn
 the camera (smears expected), then flip bit `16777216` (FSR off) / `33554432` (jitter off) and
-re-test — one run, no restarts.
+re-test — one run, no restarts. `bbport.ini` `fps_cap`/`fullscreen` now feed
+`BB_FPS_LIMIT`/`BB_FULLSCREEN` via run.sh (environment wins; our recipes set their own).
 
-**Upstream watch (2026-10-17).** The original repo released **mac-v0.4.0** (2026-10-16): the
-SwiftUI launcher (fullscreen, FPS cap 30–120, upscaler/effects/skip-intro settings, save folder
-handling) — release notes say *performance is the same as 0.3.3*; master has 15 commits since
-our merge, all launcher/ini/run.sh (`BB_FPS_LIMIT`, `BB_FULLSCREEN`, `BB_SAVE_DIR`, settings
-keep unknown keys). The `metal-native` branch is the future **0.5.0 native Metal renderer** (112
+**Upstream watch (2026-10-17).** `mac-v0.4.0` (2026-10-16) is the **SwiftUI launcher**
+(fullscreen, FPS cap 30–120, upscaler/effects/skip-intro settings, save folder handling) —
+release notes say *performance is the same as 0.3.3*; its 15 commits are now merged into our
+fork (`5521d99`). The `metal-native` branch is the future **0.5.0 native Metal renderer** (112
 commits, still active as of 2026-10-17 06:13): TAA/MetalFX/FSR 3.1 on Metal, motion passes,
 compute-emulated geometry-shader draws (the ones MoltenVK skips) — but currently **~11% slower
 than 0.4.0**, GPU-bound, the gap diagnosed as Metal hazard tracking on the guest arena + fault
